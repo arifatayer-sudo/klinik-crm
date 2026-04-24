@@ -47,6 +47,14 @@ const telefonuBirlestir = (ulkeKodu = VARSAYILAN_ULKE_KODU, numara = "") => {
   const temizNumara = String(numara || "").replace(/\s+/g, " ").trim();
   return `${kod}${temizNumara ? ` ${temizNumara}` : ""}`.trim();
 };
+const telefonuParcala = (telefon = "") => {
+  const temiz = String(telefon ?? "").trim().replace(/\s+/g, " ").replace(/^00/, "+");
+  if (!temiz) return { ulkeKodu: VARSAYILAN_ULKE_KODU, numara: "" };
+  const eslesme = temiz.match(/^(\+\d{1,4})(?:\s*)(.*)$/);
+  return eslesme
+    ? { ulkeKodu: eslesme[1], numara: eslesme[2].trim() }
+    : { ulkeKodu: VARSAYILAN_ULKE_KODU, numara: temiz.replace(/^\+/, "") };
+};
 const telefonuNormalizeEt = (telefon, varsayilanKod = VARSAYILAN_ULKE_KODU) => {
   const temiz = String(telefon ?? "").trim().replace(/\s+/g, " ").replace(/^00/, "+");
   if (!temiz) return "";
@@ -104,6 +112,19 @@ export default function App() {
   const [filtrePersonel,  setFiltrePersonel]  = useState("Tümü");
   const [menuAcik,        setMenuAcik]        = useState(true);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const medya = window.matchMedia("(max-width: 900px)");
+    const mobildeKapat = (olay) => { if (olay.matches) setMenuAcik(false); };
+    if (medya.matches) setMenuAcik(false);
+    if (medya.addEventListener) {
+      medya.addEventListener("change", mobildeKapat);
+      return () => medya.removeEventListener("change", mobildeKapat);
+    }
+    medya.addListener(mobildeKapat);
+    return () => medya.removeListener(mobildeKapat);
+  }, []);
+
   const bildirimGoster = (msg, tip = "tamam") => { setBildirim({ msg, tip }); setTimeout(() => setBildirim(null), 3200); };
   const isAdmin = kullanici?.rol === "admin";
 
@@ -142,6 +163,23 @@ export default function App() {
   const mH = (r) => ({ id: r.id, isim: r.name, telefon: r.phone, notlar: r.notes || "", olusturuldu: r.created_at });
   const mT = (r) => ({ id: r.id, hastaId: r.patient_id, islem: r.procedure, tarih: r.date, fiyat: Number(r.price) || 0, notlar: r.notes || "", personel: r.personel || "", upsales: r.upsales || false, upsalesIslem: r.upsales_islem || "", upsalesFiyat: Number(r.upsales_fiyat) || 0 });
   const mR = (r) => ({ id: r.id, tedaviId: r.treatment_id, hastaId: r.patient_id, islem: r.procedure, etiket: r.label, sonTarih: r.due_date, durum: r.status, atanan: r.assigned_to, tamamlananTarih: r.completed_at, tamamlayan: r.completed_by, waGonderildi: r.wa_sent });
+  const hatirlaticiTaslagiOlustur = (tedaviId, hastaId, veri, atanan = "Atanmamış") => {
+    const islemBilgi = islemListesi.find(i => i.isim === veri.islem);
+    const hatKurallari = veri.ozelHatirlaticilar || islemBilgi?.hatirlaticilar || [];
+    return hatKurallari.map(k => ({
+      id: uid(),
+      treatment_id: tedaviId,
+      patient_id: hastaId,
+      procedure: veri.islem,
+      label: k.etiket,
+      due_date: gunEkle(veri.tarih, k.gun),
+      status: "pending",
+      assigned_to: atanan,
+      completed_at: null,
+      completed_by: null,
+      wa_sent: false,
+    }));
+  };
 
   /* ── Hasta ── */
   const hastaEkle = async (veri) => {
@@ -161,25 +199,68 @@ export default function App() {
     setSeciliHasta(null); setModal(null); bildirimGoster("Hasta silindi", "uyari");
   };
   const hastaGuncelle = async (id, veri) => {
-    await supabase.from("patients").update({ notes: veri.notlar }).eq("id", id);
-    setHastalar(p => p.map(h => h.id === id ? { ...h, notlar: veri.notlar } : h));
-    bildirimGoster("Notlar kaydedildi ✓");
+    const telefon = telefonuNormalizeEt(veri.telefon, veri.ulkeKodu || VARSAYILAN_ULKE_KODU);
+    if (hastalar.some(h => h.id !== id && telefonAnahtari(h.telefon) === telefonAnahtari(telefon))) {
+      bildirimGoster("⚠ Bu telefon zaten kayıtlı", "uyari");
+      return false;
+    }
+    const payload = { name: veri.isim, phone: telefon, notes: veri.notlar || "" };
+    const { error } = await supabase.from("patients").update(payload).eq("id", id);
+    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
+    const guncelHasta = { id, isim: veri.isim, telefon, notlar: veri.notlar || "", olusturuldu: hastalar.find(h => h.id === id)?.olusturuldu || bugun() };
+    setHastalar(p => p.map(h => h.id === id ? { ...h, ...guncelHasta } : h));
+    setSeciliHasta(prev => prev?.id === id ? { ...prev, ...guncelHasta } : prev);
+    bildirimGoster("Hasta bilgileri kaydedildi ✓");
+    return true;
   };
 
   /* ── Tedavi ── */
   const tedaviEkle = async (hastaId, veri) => {
-    const islemBilgi = islemListesi.find(i => i.isim === veri.islem);
-    const hatKurallari = veri.ozelHatirlaticilar || islemBilgi?.hatirlaticilar || [];
     const t = { id: uid(), patient_id: hastaId, procedure: veri.islem, date: veri.tarih, price: Number(veri.fiyat) || 0, notes: veri.notlar || "", created_at: bugun(), personel: kullanici?.isim || "", upsales: veri.upsales || false, upsales_islem: veri.upsalesIslem || "", upsales_fiyat: Number(veri.upsalesFiyat) || 0 };
     const { error } = await supabase.from("treatments").insert(t);
-    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return; }
+    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
     setTedaviler(prev => [mT(t), ...prev]);
-    if (hatKurallari.length > 0) {
-      const yeniR = hatKurallari.map(k => ({ id: uid(), treatment_id: t.id, patient_id: hastaId, procedure: veri.islem, label: k.etiket, due_date: gunEkle(veri.tarih, k.gun), status: "pending", assigned_to: kullanici?.isim || "Atanmamış", completed_at: null, completed_by: null, wa_sent: false }));
+    const yeniR = hatirlaticiTaslagiOlustur(t.id, hastaId, veri, kullanici?.isim || "Atanmamış");
+    if (yeniR.length > 0) {
       await supabase.from("reminders").insert(yeniR);
       setHatirlaticilar(prev => [...prev, ...yeniR.map(mR)]);
     }
     bildirimGoster(`${veri.islem} eklendi${veri.upsales ? " + Upsales" : ""} ✓`);
+    return true;
+  };
+  const tedaviGuncelle = async (tedaviId, veri) => {
+    const mevcutTedavi = tedaviler.find(t => t.id === tedaviId);
+    if (!mevcutTedavi) return false;
+    const payload = {
+      procedure: veri.islem,
+      date: veri.tarih,
+      price: Number(veri.fiyat) || 0,
+      notes: veri.notlar || "",
+      upsales: veri.upsales || false,
+      upsales_islem: veri.upsalesIslem || "",
+      upsales_fiyat: Number(veri.upsalesFiyat) || 0,
+    };
+    const { error } = await supabase.from("treatments").update(payload).eq("id", tedaviId);
+    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
+
+    setTedaviler(prev => prev.map(t => t.id === tedaviId ? { ...t, islem: veri.islem, tarih: veri.tarih, fiyat: Number(veri.fiyat) || 0, notlar: veri.notlar || "", upsales: veri.upsales || false, upsalesIslem: veri.upsalesIslem || "", upsalesFiyat: Number(veri.upsalesFiyat) || 0 } : t));
+
+    const mevcutPending = hatirlaticilar.filter(r => r.tedaviId === tedaviId && r.durum === "pending");
+    if (mevcutPending.length > 0) {
+      await supabase.from("reminders").delete().eq("treatment_id", tedaviId).eq("status", "pending");
+      setHatirlaticilar(prev => prev.filter(r => !(r.tedaviId === tedaviId && r.durum === "pending")));
+    }
+
+    const yeniPending = hatirlaticiTaslagiOlustur(tedaviId, mevcutTedavi.hastaId, veri, mevcutPending[0]?.atanan || "Atanmamış");
+    if (yeniPending.length > 0) {
+      await supabase.from("reminders").insert(yeniPending);
+      setHatirlaticilar(prev => [...prev, ...yeniPending.map(mR)]);
+    }
+
+    await supabase.from("reminders").update({ procedure: veri.islem }).eq("treatment_id", tedaviId).eq("status", "done");
+    setHatirlaticilar(prev => prev.map(r => r.tedaviId === tedaviId && r.durum === "done" ? { ...r, islem: veri.islem } : r));
+    bildirimGoster("Tedavi güncellendi ✓");
+    return true;
   };
 
   /* ── Hatırlatıcı ── */
@@ -324,7 +405,7 @@ export default function App() {
       {modal === "hastaEkle"  && <HastaEkleModal onKapat={() => setModal(null)} onKaydet={hastaEkle} />}
       {modal === "iceriAktar" && <IceriAktarModal onKapat={() => setModal(null)} onAktar={disKaynaktanIceriAktar} />}
       {modal === "profil" && seciliHasta && (
-        <ProfilModal hasta={seciliHasta} tedaviler={tedaviler.filter(t => t.hastaId === seciliHasta.id)} hatirlaticilar={hatirlaticilar.filter(r => r.hastaId === seciliHasta.id)} onKapat={() => { setModal(null); setSeciliHasta(null); }} onTedaviEkle={v => tedaviEkle(seciliHasta.id, v)} onSil={() => hastaSil(seciliHasta.id)} onNotlarGuncelle={n => hastaGuncelle(seciliHasta.id, { notlar: n })} tamamlaIsaretle={tamamlaIsaretle} bekleyeAl={bekleyeAl} kullanici={kullanici} isAdmin={isAdmin} bildirimGoster={bildirimGoster} islemListesi={islemListesi} iletisimKaydet={iletisimKaydet} />
+        <ProfilModal hasta={seciliHasta} tedaviler={tedaviler.filter(t => t.hastaId === seciliHasta.id)} hatirlaticilar={hatirlaticilar.filter(r => r.hastaId === seciliHasta.id)} onKapat={() => { setModal(null); setSeciliHasta(null); }} onTedaviEkle={v => tedaviEkle(seciliHasta.id, v)} onTedaviGuncelle={tedaviGuncelle} onSil={() => hastaSil(seciliHasta.id)} onHastaGuncelle={v => hastaGuncelle(seciliHasta.id, v)} tamamlaIsaretle={tamamlaIsaretle} bekleyeAl={bekleyeAl} kullanici={kullanici} isAdmin={isAdmin} bildirimGoster={bildirimGoster} islemListesi={islemListesi} iletisimKaydet={iletisimKaydet} />
       )}
     </div>
   );
@@ -360,8 +441,11 @@ function GlobalStiller() {
       .appShell{height:auto!important;min-height:100vh;flex-direction:column!important;overflow:visible!important}
       .appMain{overflow:visible!important;min-width:0}
       .appContent{padding:16px!important;overflow:auto!important}
-      .sidebarShell{width:100%!important}
-      .menuToggle{display:none!important}
+      .sidebarShell{width:100%!important;padding:10px 12px!important;overflow:visible!important}
+      .sidebarTop{padding:0 2px 0!important;margin-bottom:0!important}
+      .sidebarShell.sidebarClosed .sidebarCollapsedLabel{display:block!important}
+      .sidebarShell.sidebarClosed .sidebarContent{display:none!important}
+      .menuToggle{display:flex!important;width:36px!important;height:36px!important;color:#fff!important}
       .topBar{height:auto!important;flex-wrap:wrap!important;align-items:flex-start!important;padding:12px 16px!important}
       .topBarTitle{width:100%}
       .topBarSearch{width:100%!important}
@@ -373,7 +457,7 @@ function GlobalStiller() {
       .profileHeader{flex-direction:column!important;align-items:flex-start!important;gap:14px!important}
       .profileActions{width:100%!important;flex-wrap:wrap!important}
       .profileActions > *{flex:1 1 calc(50% - 8px)}
-      .modalBox{padding:20px!important;max-height:calc(100vh - 32px);overflow-y:auto}
+      .modalBox,.profileModalBox{padding:20px!important;max-height:calc(100vh - 32px);overflow-y:auto}
       input,select,textarea{font-size:16px}
     }
     @media (max-width:640px){
@@ -463,46 +547,50 @@ function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisS
   const rRenk = gecmisSayisi > 0 ? "#e11d48" : "#d97706";
 
   return (
-    <div className="sidebarShell" style={{ width: menuAcik ? 218 : 58, background: "#1a1a2e", display: "flex", flexDirection: "column", padding: "14px 8px", gap: 2, flexShrink: 0, transition: "width .25s ease", overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: menuAcik ? "space-between" : "center", padding: "4px 4px 18px", marginBottom: 2 }}>
-        {menuAcik && (
+    <div className={`sidebarShell ${menuAcik ? "sidebarOpen" : "sidebarClosed"}`} style={{ width: menuAcik ? 218 : 58, background: "#1a1a2e", display: "flex", flexDirection: "column", padding: "14px 8px", gap: 2, flexShrink: 0, transition: "width .25s ease", overflow: "hidden" }}>
+      <div className="sidebarTop" style={{ display: "flex", alignItems: "center", justifyContent: menuAcik ? "space-between" : "center", padding: "4px 4px 18px", marginBottom: 2 }}>
+        {menuAcik ? (
           <div style={{ paddingLeft: 4 }}>
             <div style={{ fontSize: 10, letterSpacing: 2.5, textTransform: "uppercase", color: "#4a4a6a", fontWeight: 600 }}>Klinik</div>
             <div style={{ fontSize: 17, fontWeight: 800, color: "#fff" }}>CRM <span style={{ color: "#e11d48", fontStyle: "italic" }}>Pro</span></div>
           </div>
+        ) : (
+          <div className="sidebarCollapsedLabel" style={{ display: "none", color: "#fff", fontSize: 13, fontWeight: 700, paddingLeft: 4 }}>Menü</div>
         )}
         <button className="menuToggle" onClick={() => setMenuAcik(!menuAcik)} style={{ background: "rgba(255,255,255,.08)", border: "none", borderRadius: 8, width: 30, height: 30, cursor: "pointer", color: "#9b9bbb", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-          {menuAcik ? "◀" : "▶"}
+          {menuAcik ? "◀" : "☰"}
         </button>
       </div>
 
-      {menuler.map(m => (
-        <div key={m.k} className={`nav ${gorunum === m.k ? "aktif" : ""}`} onClick={() => setGorunum(m.k)}
-          style={{ justifyContent: menuAcik ? "flex-start" : "center", padding: menuAcik ? "10px 12px" : "10px", position: "relative" }}
-          title={!menuAcik ? m.e : ""}>
-          <span style={{ fontSize: 15, flexShrink: 0 }}>{m.i}</span>
-          {menuAcik && <span style={{ flex: 1, whiteSpace: "nowrap", fontSize: 13 }}>{m.e}</span>}
-          {m.k === "hatirlaticilar" && rozet > 0 && (
-            <span style={{ background: rRenk, color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 700, position: menuAcik ? "relative" : "absolute", top: menuAcik ? 0 : 4, right: menuAcik ? 0 : 4 }} className="mono">{rozet}</span>
-          )}
-        </div>
-      ))}
-
-      <div style={{ marginTop: "auto", borderTop: "1px solid #2d2d4e", paddingTop: 10 }}>
-        {menuAcik ? (
-          <div style={{ padding: "6px 8px", display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
-            <Avatar isim={kullanici.isim} boyut={30} />
-            <div style={{ flex: 1, overflow: "hidden" }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{kullanici.isim}</div>
-              <div style={{ fontSize: 10, color: kullanici.rol === "admin" ? "#e11d48" : "#4a4a6a", textTransform: "uppercase", letterSpacing: .5 }}>{kullanici.rol === "admin" ? "👑 Admin" : "Personel"}</div>
-            </div>
+      <div className="sidebarContent" style={{ display: "flex", flexDirection: "column", flex: 1 }}>
+        {menuler.map(m => (
+          <div key={m.k} className={`nav ${gorunum === m.k ? "aktif" : ""}`} onClick={() => { setGorunum(m.k); if (window.innerWidth <= 900) setMenuAcik(false); }}
+            style={{ justifyContent: menuAcik ? "flex-start" : "center", padding: menuAcik ? "10px 12px" : "10px", position: "relative" }}
+            title={!menuAcik ? m.e : ""}>
+            <span style={{ fontSize: 15, flexShrink: 0 }}>{m.i}</span>
+            {menuAcik && <span style={{ flex: 1, whiteSpace: "nowrap", fontSize: 13 }}>{m.e}</span>}
+            {m.k === "hatirlaticilar" && rozet > 0 && (
+              <span style={{ background: rRenk, color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 700, position: menuAcik ? "relative" : "absolute", top: menuAcik ? 0 : 4, right: menuAcik ? 0 : 4 }} className="mono">{rozet}</span>
+            )}
           </div>
-        ) : (
-          <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 8px" }}><Avatar isim={kullanici.isim} boyut={28} /></div>
-        )}
-        <button className="btn" onClick={onCikis} style={{ width: "100%", background: "rgba(255,255,255,.06)", color: "#9b9bbb", padding: menuAcik ? "7px 10px" : "7px", fontSize: 12, textAlign: menuAcik ? "left" : "center" }}>
-          {menuAcik ? "⇤ Çıkış Yap" : "⇤"}
-        </button>
+        ))}
+
+        <div style={{ marginTop: "auto", borderTop: "1px solid #2d2d4e", paddingTop: 10 }}>
+          {menuAcik ? (
+            <div style={{ padding: "6px 8px", display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
+              <Avatar isim={kullanici.isim} boyut={30} />
+              <div style={{ flex: 1, overflow: "hidden" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{kullanici.isim}</div>
+                <div style={{ fontSize: 10, color: kullanici.rol === "admin" ? "#e11d48" : "#4a4a6a", textTransform: "uppercase", letterSpacing: .5 }}>{kullanici.rol === "admin" ? "👑 Admin" : "Personel"}</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 8px" }}><Avatar isim={kullanici.isim} boyut={28} /></div>
+          )}
+          <button className="btn" onClick={onCikis} style={{ width: "100%", background: "rgba(255,255,255,.06)", color: "#9b9bbb", padding: menuAcik ? "7px 10px" : "7px", fontSize: 12, textAlign: menuAcik ? "left" : "center" }}>
+            {menuAcik ? "⇤ Çıkış Yap" : "⇤"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -630,6 +718,7 @@ function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, kullanici, i
                 <td style={{ padding: "11px 14px", fontSize: 12, color: "#9b8f88" }}>{son ? tarihFmt(son.tarih) : "Henüz yok"}</td>
                 <td style={{ padding: "11px 14px" }} onClick={e => e.stopPropagation()}>
                   <div style={{ display: "flex", gap: 5 }}>
+                    <Btn kk onClick={() => onSec(h)} style={{ background: "#eef5ff", color: "#1d4ed8", border: "1px solid #bfdbfe" }}>✎</Btn>
                     <a href={`tel:${h.telefon}`} onClick={() => iletisimKaydet(h.id, h.isim, "Arama", kullanici?.isim, "—")}><Btn kk koyu>📞</Btn></a>
                     <a href={`https://wa.me/${h.telefon.replace(/[^0-9]/g, "")}`} target="_blank" rel="noreferrer" onClick={() => iletisimKaydet(h.id, h.isim, "WhatsApp", kullanici?.isim, "—")}><Btn kk style={{ background: "#f0fdf4", color: "#059669", border: "1px solid #a7f3d0" }}>💬</Btn></a>
                   </div>
@@ -1021,38 +1110,96 @@ function PersonelSatiri({ p, onSil, onPinGuncelle }) {
 /* ══════════════════════════════════════════════════
    PROFİL MODALİ
 ══════════════════════════════════════════════════ */
-function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, onSil, onNotlarGuncelle, tamamlaIsaretle, bekleyeAl, kullanici, isAdmin, bildirimGoster, islemListesi, iletisimKaydet }) {
-  const [notlar,     setNotlar]     = useState(hasta.notlar || "");
-  const [tedaviEk,   setTedaviEk]   = useState(false);
-  const [kaydedildi, setKaydedildi] = useState(false);
-  const [txForm,     setTxForm]     = useState({ islem: islemListesi[0]?.isim || "Botox", tarih: bugun(), fiyat: "", notlar: "", upsales: false, upsalesIslem: "", upsalesFiyat: "" });
-  const [hatTmpl,    setHatTmpl]    = useState([]);
+function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, onTedaviGuncelle, onSil, onHastaGuncelle, tamamlaIsaretle, bekleyeAl, kullanici, isAdmin, islemListesi, iletisimKaydet }) {
+  const bosTxForm = () => ({ islem: islemListesi[0]?.isim || "Botox", tarih: bugun(), fiyat: "", notlar: "", upsales: false, upsalesIslem: "", upsalesFiyat: "", ozelHatirlaticilar: null });
+  const [hastaForm, setHastaForm] = useState(() => ({ isim: hasta.isim, ...telefonuParcala(hasta.telefon) }));
+  const [notlar, setNotlar] = useState(hasta.notlar || "");
+  const [tedaviEk, setTedaviEk] = useState(false);
+  const [bilgiKaydedildi, setBilgiKaydedildi] = useState(false);
+  const [notKaydedildi, setNotKaydedildi] = useState(false);
+  const [duzenlenenTedaviId, setDuzenlenenTedaviId] = useState(null);
+  const [txForm, setTxForm] = useState(bosTxForm);
+  const [hatTmpl, setHatTmpl] = useState([]);
 
   useEffect(() => {
+    setHastaForm({ isim: hasta.isim, ...telefonuParcala(hasta.telefon) });
+    setNotlar(hasta.notlar || "");
+  }, [hasta.id, hasta.isim, hasta.telefon, hasta.notlar]);
+
+  useEffect(() => {
+    if (txForm.ozelHatirlaticilar?.length) {
+      setHatTmpl(txForm.ozelHatirlaticilar.map(h => ({ ...h })));
+      return;
+    }
     const b = islemListesi.find(i => i.isim === txForm.islem);
     setHatTmpl(b?.hatirlaticilar ? b.hatirlaticilar.map(h => ({ ...h })) : []);
-  }, [txForm.islem, islemListesi]);
+  }, [txForm.islem, txForm.ozelHatirlaticilar, islemListesi]);
 
   const hatGuncelle = (idx, alan, val) => {
-    const y = [...hatTmpl]; y[idx] = { ...y[idx], [alan]: alan === "gun" ? Number(val) : val };
-    setHatTmpl(y); setTxForm(f => ({ ...f, ozelHatirlaticilar: y }));
+    const y = [...hatTmpl];
+    y[idx] = { ...y[idx], [alan]: alan === "gun" ? Number(val) : val };
+    setHatTmpl(y);
+    setTxForm(f => ({ ...f, ozelHatirlaticilar: y }));
   };
-  const notlarKaydet = () => { onNotlarGuncelle(notlar); setKaydedildi(true); setTimeout(() => setKaydedildi(false), 1500); };
-  const tedaviKaydet = () => {
-    if (!txForm.tarih) return;
-    onTedaviEkle({ ...txForm, ozelHatirlaticilar: txForm.ozelHatirlaticilar || hatTmpl });
+  const hastaPayload = () => ({ isim: hastaForm.isim, ulkeKodu: hastaForm.ulkeKodu, telefon: telefonuBirlestir(hastaForm.ulkeKodu, hastaForm.numara), notlar });
+  const bilgiKaydet = async () => {
+    if (!hastaForm.isim || !hastaForm.numara) return;
+    const kaydedildi = await onHastaGuncelle(hastaPayload());
+    if (kaydedildi) {
+      setBilgiKaydedildi(true);
+      setTimeout(() => setBilgiKaydedildi(false), 1500);
+    }
+  };
+  const notlarKaydet = async () => {
+    const kaydedildi = await onHastaGuncelle(hastaPayload());
+    if (kaydedildi) {
+      setNotKaydedildi(true);
+      setTimeout(() => setNotKaydedildi(false), 1500);
+    }
+  };
+  const tedaviFormunuSifirla = () => {
     setTedaviEk(false);
-    setTxForm({ islem: islemListesi[0]?.isim || "Botox", tarih: bugun(), fiyat: "", notlar: "", upsales: false, upsalesIslem: "", upsalesFiyat: "" });
+    setDuzenlenenTedaviId(null);
+    setTxForm(bosTxForm());
+    setHatTmpl([]);
+  };
+  const tedaviDuzenle = (tedavi) => {
+    const bekleyenTedaviHat = hatirlaticilar
+      .filter(r => r.tedaviId === tedavi.id && r.durum === "pending")
+      .sort((a, b) => a.sonTarih.localeCompare(b.sonTarih));
+    const mevcutHatTmpl = bekleyenTedaviHat.length > 0
+      ? bekleyenTedaviHat.map(r => ({ etiket: r.etiket, gun: Math.max(0, Math.round((new Date(r.sonTarih) - new Date(tedavi.tarih)) / 86400000)) }))
+      : (islemListesi.find(i => i.isim === tedavi.islem)?.hatirlaticilar || []).map(h => ({ ...h }));
+    setDuzenlenenTedaviId(tedavi.id);
+    setTxForm({
+      islem: tedavi.islem,
+      tarih: tedavi.tarih || bugun(),
+      fiyat: tedavi.fiyat ? String(tedavi.fiyat) : "",
+      notlar: tedavi.notlar || "",
+      upsales: Boolean(tedavi.upsales),
+      upsalesIslem: tedavi.upsalesIslem || "",
+      upsalesFiyat: tedavi.upsalesFiyat ? String(tedavi.upsalesFiyat) : "",
+      ozelHatirlaticilar: mevcutHatTmpl,
+    });
+    setHatTmpl(mevcutHatTmpl);
+    setTedaviEk(true);
+  };
+  const tedaviKaydet = async () => {
+    if (!txForm.tarih) return;
+    const payload = { ...txForm, ozelHatirlaticilar: txForm.ozelHatirlaticilar || hatTmpl };
+    const kaydedildi = duzenlenenTedaviId
+      ? await onTedaviGuncelle(duzenlenenTedaviId, payload)
+      : await onTedaviEkle(payload);
+    if (kaydedildi) tedaviFormunuSifirla();
   };
 
-  const bekleyenHat   = hatirlaticilar.filter(r => r.durum === "pending").sort((a, b) => a.sonTarih.localeCompare(b.sonTarih));
-  const tamamlHat     = hatirlaticilar.filter(r => r.durum === "done");
+  const bekleyenHat = hatirlaticilar.filter(r => r.durum === "pending").sort((a, b) => a.sonTarih.localeCompare(b.sonTarih));
+  const tamamlHat = hatirlaticilar.filter(r => r.durum === "done");
   const toplamHarcama = tedaviler.reduce((s, t) => s + (t.fiyat || 0), 0);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 9000, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "28px 16px", backdropFilter: "blur(5px)", overflowY: "auto" }} onClick={onKapat}>
       <div className="profileModalBox" style={{ background: "#fff", borderRadius: 22, width: 940, maxWidth: "100%", boxShadow: "0 40px 100px rgba(0,0,0,.3)", animation: "yukariCik .25s ease", overflow: "hidden" }} onClick={e => e.stopPropagation()}>
-        {/* Header */}
         <div className="profileHeader" style={{ background: "linear-gradient(135deg,#1a1a2e,#16213e)", padding: "22px 26px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <Avatar isim={hasta.isim} boyut={48} />
@@ -1068,19 +1215,17 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
             <a href={`https://wa.me/${hasta.telefon.replace(/[^0-9]/g, "")}`} target="_blank" rel="noreferrer" onClick={() => iletisimKaydet(hasta.id, hasta.isim, "WhatsApp", kullanici?.isim, "—")}>
               <Btn style={{ background: "#059669", color: "#fff" }}>💬 WhatsApp</Btn>
             </a>
-            {!tedaviEk && <Btn onClick={() => setTedaviEk(true)} style={{ background: "#e11d48", color: "#fff" }}>+ Tedavi Ekle</Btn>}
+            {!tedaviEk && <Btn onClick={() => { setDuzenlenenTedaviId(null); setTedaviEk(true); }} style={{ background: "#e11d48", color: "#fff" }}>+ Tedavi Ekle</Btn>}
             <button onClick={onKapat} style={{ background: "none", border: "none", color: "#9b9bbb", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
           </div>
         </div>
 
         <div className="profileGrid" style={{ padding: 24, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-          {/* Sol */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* İstatistikler */}
             <div className="grid3" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
               {[
-                { e: "Tedavi",   d: tedaviler.length,               r: "#7c3aed" },
-                { e: "Bekleyen", d: bekleyenHat.length,             r: "#e11d48" },
+                { e: "Tedavi", d: tedaviler.length, r: "#7c3aed" },
+                { e: "Bekleyen", d: bekleyenHat.length, r: "#e11d48" },
                 { e: isAdmin ? "Harcama" : "Upsales", d: isAdmin ? paraFmt(toplamHarcama) : tedaviler.filter(t => t.upsales).length, r: isAdmin ? "#059669" : "#ca8a04" },
               ].map(s => (
                 <div key={s.e} style={{ background: "#f8f6f3", borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
@@ -1090,18 +1235,30 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
               ))}
             </div>
 
-            {/* Tedavi ekleme formu */}
+            <div className="kart" style={{ padding: 18 }}>
+              <div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: .5 }}>Hasta Bilgileri</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <input className="giris" value={hastaForm.isim} onChange={e => setHastaForm(f => ({ ...f, isim: e.target.value }))} placeholder="Ad Soyad" />
+                <div className="mobileWrap" style={{ display: "flex", gap: 8 }}>
+                  <input className="giris" value={hastaForm.ulkeKodu} onChange={e => setHastaForm(f => ({ ...f, ulkeKodu: e.target.value.startsWith("+") ? e.target.value : `+${e.target.value.replace(/\+/g, "")}` }))} placeholder="+90" style={{ maxWidth: 100 }} />
+                  <input className="giris" type="tel" value={hastaForm.numara} onChange={e => setHastaForm(f => ({ ...f, numara: e.target.value }))} placeholder="532 000 0000" style={{ flex: 1 }} />
+                </div>
+                <Btn onClick={bilgiKaydet} koyu style={{ width: "100%", background: bilgiKaydedildi ? "#059669" : "#1a1a2e", fontWeight: 600 }}>
+                  {bilgiKaydedildi ? "✓ Bilgiler Kaydedildi" : "Bilgileri Kaydet"}
+                </Btn>
+              </div>
+            </div>
+
             {tedaviEk && (
               <div style={{ background: "#f8f6f3", borderRadius: 14, padding: 18, border: "2px solid #1a1a2e" }}>
-                <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14, color: "#1a1a2e" }}>🧴 Yeni Tedavi Ekle</div>
+                <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14, color: "#1a1a2e" }}>{duzenlenenTedaviId ? "🛠 Tedaviyi Düzenle" : "🧴 Yeni Tedavi Ekle"}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   <select className="giris" value={txForm.islem} onChange={e => setTxForm(f => ({ ...f, islem: e.target.value, ozelHatirlaticilar: null }))}>
                     {islemListesi.map(i => <option key={i.id}>{i.isim}</option>)}
                   </select>
 
-                  {/* Hatırlatıcı günlerini düzenle */}
                   <div style={{ background: "#fff", borderRadius: 10, padding: "12px 14px", border: "1px solid #e4ddd5" }}>
-                    <div style={{ fontSize: 12, color: "#9b8f88", fontWeight: 600, marginBottom: 10 }}>🔔 Hatırlatıcı Günleri (İsteğe bağlı özelleştir)</div>
+                    <div style={{ fontSize: 12, color: "#9b8f88", fontWeight: 600, marginBottom: 10 }}>🔔 Hatırlatıcı Günleri</div>
                     {hatTmpl.map((h, idx) => (
                       <div key={idx} style={{ display: "flex", gap: 7, alignItems: "center", marginBottom: 7 }}>
                         <input className="giris" value={h.etiket} onChange={e => hatGuncelle(idx, "etiket", e.target.value)} style={{ flex: 2, fontSize: 12 }} />
@@ -1115,7 +1272,6 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
                   <input className="giris" type="number" placeholder="Ücret (₺)" value={txForm.fiyat} onChange={e => setTxForm(f => ({ ...f, fiyat: e.target.value }))} />
                   <textarea className="giris" rows={2} placeholder="Notlar…" value={txForm.notlar} onChange={e => setTxForm(f => ({ ...f, notlar: e.target.value }))} style={{ resize: "none" }} />
 
-                  {/* Upsales kutusu */}
                   <div style={{ background: "#fffbeb", border: "2px solid #fde68a", borderRadius: 10, padding: "12px 14px" }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", fontWeight: 700, fontSize: 14, color: "#92400e" }}>
                       <input type="checkbox" checked={txForm.upsales} onChange={e => setTxForm(f => ({ ...f, upsales: e.target.checked }))} style={{ width: 18, height: 18, cursor: "pointer" }} />
@@ -1123,34 +1279,32 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
                     </label>
                     {txForm.upsales && (
                       <div className="mobileWrap" style={{ display: "flex", gap: 9, marginTop: 12 }}>
-                        <input className="giris" placeholder="Upsales işlem adı (ör: Serum, Maske…)" value={txForm.upsalesIslem} onChange={e => setTxForm(f => ({ ...f, upsalesIslem: e.target.value }))} style={{ flex: 2 }} />
+                        <input className="giris" placeholder="Upsales işlem adı" value={txForm.upsalesIslem} onChange={e => setTxForm(f => ({ ...f, upsalesIslem: e.target.value }))} style={{ flex: 2 }} />
                         <input className="giris" type="number" placeholder="₺ Tutar" value={txForm.upsalesFiyat} onChange={e => setTxForm(f => ({ ...f, upsalesFiyat: e.target.value }))} style={{ flex: 1 }} />
                       </div>
                     )}
                   </div>
 
                   <div className="mobileWrap" style={{ display: "flex", gap: 8 }}>
-                    <Btn onClick={() => setTedaviEk(false)} style={{ background: "#f1ede8", color: "#78706a", flex: 1 }}>İptal</Btn>
-                    <Btn onClick={tedaviKaydet} koyu style={{ flex: 2, fontWeight: 700 }}>Tedaviyi Kaydet</Btn>
+                    <Btn onClick={tedaviFormunuSifirla} style={{ background: "#f1ede8", color: "#78706a", flex: 1 }}>İptal</Btn>
+                    <Btn onClick={tedaviKaydet} koyu style={{ flex: 2, fontWeight: 700 }}>{duzenlenenTedaviId ? "Tedaviyi Güncelle" : "Tedaviyi Kaydet"}</Btn>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Notlar */}
             <div>
               <div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: .5 }}>Klinik Notları</div>
               <textarea className="giris" rows={3} value={notlar} onChange={e => setNotlar(e.target.value)} placeholder="Alerji, tercih, gözlem…" style={{ resize: "vertical" }} />
-              <Btn onClick={notlarKaydet} koyu style={{ width: "100%", marginTop: 8, background: kaydedildi ? "#059669" : "#1a1a2e", fontWeight: 600 }}>{kaydedildi ? "✓ Kaydedildi" : "Notları Kaydet"}</Btn>
+              <Btn onClick={notlarKaydet} koyu style={{ width: "100%", marginTop: 8, background: notKaydedildi ? "#059669" : "#1a1a2e", fontWeight: 600 }}>{notKaydedildi ? "✓ Notlar Kaydedildi" : "Notları Kaydet"}</Btn>
             </div>
 
-            {/* Tedavi geçmişi */}
             <div>
               <div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: .5 }}>Tedavi Geçmişi</div>
               {tedaviler.length === 0 ? <Bos metin="Henüz tedavi yok" /> :
                 [...tedaviler].sort((a, b) => b.tarih?.localeCompare(a.tarih)).map(t => (
                   <div key={t.id} style={{ background: "#f8f6f3", borderRadius: 10, padding: "10px 14px", marginBottom: 7, border: "1px solid #ece7e0" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                    <div className="mobileWrap" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
                       <IslemEtiketi islem={t.islem} />
                       <span style={{ fontSize: 12, color: "#9b8f88" }}>{tarihFmt(t.tarih)}</span>
                       {t.upsales && (
@@ -1159,6 +1313,7 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
                         </span>
                       )}
                       {isAdmin && t.fiyat > 0 && <span className="mono" style={{ marginLeft: "auto", fontSize: 13, fontWeight: 700, color: "#059669" }}>{paraFmt(t.fiyat)}</span>}
+                      <Btn kk onClick={() => tedaviDuzenle(t)} style={{ background: "#fff", border: "1px solid #d6cfc6", color: "#5a4a3a" }}>Düzenle</Btn>
                     </div>
                     {t.notlar && <div style={{ fontSize: 12, color: "#78706a" }}>{t.notlar}</div>}
                     <div style={{ fontSize: 11, color: "#b0a89e", marginTop: 3 }}>Personel: {t.personel || "—"}</div>
@@ -1168,7 +1323,6 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
             </div>
           </div>
 
-          {/* Sağ — Hatırlatıcılar */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div>
               <div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: .5 }}>Yaklaşan Hatırlatıcılar</div>
