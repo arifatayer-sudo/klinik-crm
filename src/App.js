@@ -20,13 +20,64 @@ const VARSAYILAN_ISLEMLER = [
   { id: "i3", isim: "Mezoterapi", renk: "#059669", hatirlaticilar: [{ etiket: "2 Hafta Takibi", gun: 14 }, { etiket: "3 Ay Destekleyici", gun: 90 }] },
 ];
 
+const VARSAYILAN_ULKE_KODU = "+90";
+const EXCEL_ALANLARI = {
+  isim: ["isim", "ad soyad", "adsoyad", "hasta", "hasta adı", "hasta adi", "name", "full name", "fullname"],
+  telefon: ["telefon", "telefon numarası", "telefon numarasi", "tel", "gsm", "mobile", "phone"],
+  islem: ["islem", "işlem", "procedure", "tedavi", "treatment"],
+  tarih: ["tarih", "işlem tarihi", "islem tarihi", "tedavi tarihi", "date"],
+  fiyat: ["fiyat", "ucret", "ücret", "price", "tutar"],
+  notlar: ["notlar", "not", "notes", "açıklama", "aciklama", "açiklama", "acıklama"],
+};
+
 const uid      = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 const bugun    = () => new Date().toISOString().slice(0, 10);
 const gunEkle  = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
 const gunFarki = (s) => { const a = new Date(s); a.setHours(0,0,0,0); const b = new Date(); b.setHours(0,0,0,0); return Math.ceil((a - b) / 86400000); };
 const tarihFmt  = (s) => s ? new Date(s).toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 const tarihKisa = (s) => s ? new Date(s).toLocaleDateString("tr-TR", { day: "2-digit", month: "short" }) : "—";
-const normaliz  = (s) => s?.replace(/\s/g, "").toLowerCase();
+const anahtarNormaliz = (s) => String(s ?? "")
+  .trim()
+  .toLocaleLowerCase("tr-TR")
+  .normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .replace(/ı/g, "i");
+const telefonuBirlestir = (ulkeKodu = VARSAYILAN_ULKE_KODU, numara = "") => {
+  const kod = String(ulkeKodu || VARSAYILAN_ULKE_KODU).trim();
+  const temizNumara = String(numara || "").replace(/\s+/g, " ").trim();
+  return `${kod}${temizNumara ? ` ${temizNumara}` : ""}`.trim();
+};
+const telefonuNormalizeEt = (telefon, varsayilanKod = VARSAYILAN_ULKE_KODU) => {
+  const temiz = String(telefon ?? "").trim().replace(/\s+/g, " ").replace(/^00/, "+");
+  if (!temiz) return "";
+  const eslesme = temiz.match(/^(\+\d{1,4})(?:\s*)(.*)$/);
+  return eslesme ? telefonuBirlestir(eslesme[1], eslesme[2]) : telefonuBirlestir(varsayilanKod, temiz.replace(/^\+/, ""));
+};
+const telefonAnahtari = (telefon) => telefonuNormalizeEt(telefon).replace(/[^\d+]/g, "");
+const alanDegeriBul = (satir, adaylar) => {
+  const kayitlar = Object.entries(satir || {});
+  for (const aday of adaylar) {
+    const hedef = anahtarNormaliz(aday);
+    const bulunan = kayitlar.find(([anahtar]) => anahtarNormaliz(anahtar) === hedef);
+    if (bulunan && String(bulunan[1] ?? "").trim()) return bulunan[1];
+  }
+  return "";
+};
+const excelTarihiniNormalizeEt = (deger) => {
+  if (!deger) return "";
+  if (deger instanceof Date && !Number.isNaN(deger.getTime())) return deger.toISOString().slice(0, 10);
+  const metin = String(deger).trim();
+  if (!metin) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(metin)) return metin;
+  const parcalar = metin.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+  if (parcalar) {
+    let [, gun, ay, yil] = parcalar;
+    if (yil.length === 2) yil = `20${yil}`;
+    return `${yil.padStart(4, "0")}-${ay.padStart(2, "0")}-${gun.padStart(2, "0")}`;
+  }
+  const tarih = new Date(metin);
+  return Number.isNaN(tarih.getTime()) ? "" : tarih.toISOString().slice(0, 10);
+};
 const lsAl      = (k, v) => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : v; } catch { return v; } };
 const lsKaydet  = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 const paraFmt   = (n) => `₺${Number(n || 0).toLocaleString("tr-TR")}`;
@@ -94,11 +145,12 @@ export default function App() {
 
   /* ── Hasta ── */
   const hastaEkle = async (veri) => {
-    if (hastalar.some(h => normaliz(h.telefon) === normaliz(veri.telefon))) { bildirimGoster("⚠ Bu telefon zaten kayıtlı", "uyari"); return false; }
-    const y = { id: uid(), name: veri.isim, phone: veri.telefon, notes: veri.notlar || "", created_at: bugun() };
+    const telefon = telefonuNormalizeEt(veri.telefon, veri.ulkeKodu || VARSAYILAN_ULKE_KODU);
+    if (hastalar.some(h => telefonAnahtari(h.telefon) === telefonAnahtari(telefon))) { bildirimGoster("⚠ Bu telefon zaten kayıtlı", "uyari"); return false; }
+    const y = { id: uid(), name: veri.isim, phone: telefon, notes: veri.notlar || "", created_at: bugun() };
     const { error } = await supabase.from("patients").insert(y);
     if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
-    setHastalar(prev => [{ id: y.id, isim: veri.isim, telefon: veri.telefon, notlar: veri.notlar || "", olusturuldu: bugun() }, ...prev]);
+    setHastalar(prev => [{ id: y.id, isim: veri.isim, telefon, notlar: veri.notlar || "", olusturuldu: bugun() }, ...prev]);
     bildirimGoster("Hasta eklendi ✓"); return true;
   };
   const hastaSil = async (id) => {
@@ -140,24 +192,88 @@ export default function App() {
   const personelAta = async (id, per) => { await supabase.from("reminders").update({ assigned_to: per }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, atanan: per } : r)); };
   const waGonderildi = async (id) => { await supabase.from("reminders").update({ wa_sent: true }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, waGonderildi: true } : r)); };
 
-  /* ── CSV ── */
-  const csvIceriAktar = async (csv) => {
-    const satirlar = csv.trim().split("\n").slice(1); let ek = 0, at = 0;
-    for (const s of satirlar) {
-      const [isim, tel, islem, tarih, fiyat, notlar] = s.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
-      if (!isim || !tel) { at++; continue; }
-      if (hastalar.some(h => normaliz(h.telefon) === normaliz(tel))) { at++; continue; }
-      const p = { id: uid(), name: isim, phone: tel, notes: notlar || "", created_at: bugun() };
-      await supabase.from("patients").insert(p);
+  /* ── Excel / CSV ── */
+  const disKaynaktanIceriAktar = async (kayitlar) => {
+    const varOlanTelefonlar = new Set(hastalar.map(h => telefonAnahtari(h.telefon)));
+    let ek = 0, at = 0, hata = 0;
+    for (const kayit of kayitlar) {
+      const isim = String(kayit.isim || "").trim();
+      const telefon = telefonuNormalizeEt(kayit.telefon, kayit.ulkeKodu || VARSAYILAN_ULKE_KODU);
+      const telefonKey = telefonAnahtari(telefon);
+      const islem = String(kayit.islem || "").trim();
+      const tarih = excelTarihiniNormalizeEt(kayit.tarih);
+      const fiyat = Number(String(kayit.fiyat || "").replace(",", ".")) || 0;
+      const notlar = String(kayit.notlar || "").trim();
+
+      if (!isim || !telefon || !telefonKey || varOlanTelefonlar.has(telefonKey)) { at++; continue; }
+
+      const p = { id: uid(), name: isim, phone: telefon, notes: notlar, created_at: bugun() };
+      const { error: hastaHata } = await supabase.from("patients").insert(p);
+      if (hastaHata) { hata++; continue; }
+
+      varOlanTelefonlar.add(telefonKey);
+      ek++;
+
       if (islem && tarih) {
         const ib = islemListesi.find(i => i.isim === islem);
-        const t = { id: uid(), patient_id: p.id, procedure: islem, date: tarih, price: Number(fiyat) || 0, notes: "", created_at: bugun(), personel: kullanici?.isim || "", upsales: false, upsales_islem: "", upsales_fiyat: 0 };
-        await supabase.from("treatments").insert(t);
-        if (ib) { const rems = ib.hatirlaticilar.map(k => ({ id: uid(), treatment_id: t.id, patient_id: p.id, procedure: islem, label: k.etiket, due_date: gunEkle(tarih, k.gun), status: "pending", assigned_to: "Atanmamış", completed_at: null, completed_by: null, wa_sent: false })); await supabase.from("reminders").insert(rems); }
+        const t = { id: uid(), patient_id: p.id, procedure: islem, date: tarih, price: fiyat, notes: "", created_at: bugun(), personel: kullanici?.isim || "", upsales: false, upsales_islem: "", upsales_fiyat: 0 };
+        const { error: tedaviHata } = await supabase.from("treatments").insert(t);
+        if (!tedaviHata && ib) {
+          const rems = ib.hatirlaticilar.map(k => ({ id: uid(), treatment_id: t.id, patient_id: p.id, procedure: islem, label: k.etiket, due_date: gunEkle(tarih, k.gun), status: "pending", assigned_to: "Atanmamış", completed_at: null, completed_by: null, wa_sent: false }));
+          await supabase.from("reminders").insert(rems);
+        }
       }
-      ek++;
     }
-    bildirimGoster(`${ek} hasta eklendi, ${at} atlandı`);
+    const mesaj = [`${ek} hasta eklendi`, at > 0 ? `${at} atlandı` : null, hata > 0 ? `${hata} hata oluştu` : null].filter(Boolean).join(", ");
+    bildirimGoster(mesaj, hata > 0 ? "uyari" : "tamam");
+  };
+
+  const hastalariDisaAktar = async (liste = hastalar) => {
+    if (!liste.length) { bildirimGoster("Dışa aktarılacak hasta yok", "uyari"); return; }
+    try {
+      const XLSX = await import("xlsx");
+      const satirlar = liste.map(hasta => {
+        const hastaTedavileri = tedaviler
+          .filter(t => t.hastaId === hasta.id)
+          .sort((a, b) => (b.tarih || "").localeCompare(a.tarih || ""));
+        const bekleyenHat = hatirlaticilar.filter(r => r.hastaId === hasta.id && r.durum === "pending");
+        const sonTedavi = hastaTedavileri[0];
+
+        return {
+          hasta_id: hasta.id,
+          isim: hasta.isim,
+          telefon: hasta.telefon,
+          notlar: hasta.notlar || "",
+          tedavi_sayisi: hastaTedavileri.length,
+          son_tedavi: sonTedavi?.islem || "",
+          son_ziyaret: sonTedavi?.tarih || "",
+          bekleyen_hatirlatici: bekleyenHat.length,
+          toplam_harcama: hastaTedavileri.reduce((toplam, t) => toplam + (t.fiyat || 0), 0),
+          kayit_tarihi: String(hasta.olusturuldu || "").slice(0, 10),
+        };
+      });
+
+      const ws = XLSX.utils.json_to_sheet(satirlar);
+      ws["!cols"] = [
+        { wch: 12 },
+        { wch: 24 },
+        { wch: 18 },
+        { wch: 28 },
+        { wch: 12 },
+        { wch: 16 },
+        { wch: 14 },
+        { wch: 18 },
+        { wch: 14 },
+        { wch: 14 },
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Hastalar");
+      XLSX.writeFile(wb, `hasta-listesi-${bugun()}.xlsx`);
+      bildirimGoster(`${satirlar.length} hasta dışa aktarıldı ✓`);
+    } catch (error) {
+      bildirimGoster("Dışa aktarma sırasında hata oluştu", "hata");
+    }
   };
 
   /* ── Hesaplananlar ── */
@@ -186,12 +302,12 @@ export default function App() {
   if (!kullanici) return <GirisEkrani personelListesi={personelListesi} onGiris={oturumAc} bildirim={bildirim} />;
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#f8f6f3", fontFamily: "'Outfit','Helvetica Neue',sans-serif", overflow: "hidden" }}>
+    <div className="appShell" style={{ display: "flex", height: "100vh", background: "#f8f6f3", fontFamily: "'Outfit','Helvetica Neue',sans-serif", overflow: "hidden" }}>
       <GlobalStiller />
       <YanMenu gorunum={gorunum} setGorunum={setGorunum} kullanici={kullanici} onCikis={oturumKapat} bugunSayisi={bugunHat.length} gecmisSayisi={gecmisHat.length} menuAcik={menuAcik} setMenuAcik={setMenuAcik} isAdmin={isAdmin} />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <UstBar gorunum={gorunum} onHastaEkle={() => setModal("hastaEkle")} onIceriAktar={() => setModal("iceriAktar")} hastaArama={hastaArama} setHastaArama={setHastaArama} isAdmin={isAdmin} />
-        <div style={{ flex: 1, overflowY: "auto", padding: "22px 26px", animation: "yukariCik .3s ease" }}>
+      <div className="appMain" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <UstBar gorunum={gorunum} onHastaEkle={() => setModal("hastaEkle")} onIceriAktar={() => setModal("iceriAktar")} onDisaAktar={() => hastalariDisaAktar(filtreliHastalar)} hastaArama={hastaArama} setHastaArama={setHastaArama} isAdmin={isAdmin} />
+        <div className="appContent" style={{ flex: 1, overflowY: "auto", padding: "22px 26px", animation: "yukariCik .3s ease" }}>
           {yukleniyor ? <Yukleniyor /> : (
             <>
               {gorunum === "panel"          && <Panel hastalar={hastalar} tedaviler={tedaviler} hastaHaritasi={hastaHaritasi} bugunHat={bugunHat} gecmisHat={gecmisHat} gelecekHat={gelecekHat} tamamlananHat={tamamlananHat} toplamGelir={toplamGelir} aylikGelir={aylikGelir} tamamlaIsaretle={tamamlaIsaretle} setGorunum={setGorunum} setHatTab={setHatTab} isAdmin={isAdmin} kullanici={kullanici} iletisimKaydet={iletisimKaydet} />}
@@ -206,7 +322,7 @@ export default function App() {
       </div>
       {bildirim && <Bildirim {...bildirim} />}
       {modal === "hastaEkle"  && <HastaEkleModal onKapat={() => setModal(null)} onKaydet={hastaEkle} />}
-      {modal === "iceriAktar" && <IceriAktarModal onKapat={() => setModal(null)} onAktar={csv => { csvIceriAktar(csv); setModal(null); }} />}
+      {modal === "iceriAktar" && <IceriAktarModal onKapat={() => setModal(null)} onAktar={disKaynaktanIceriAktar} />}
       {modal === "profil" && seciliHasta && (
         <ProfilModal hasta={seciliHasta} tedaviler={tedaviler.filter(t => t.hastaId === seciliHasta.id)} hatirlaticilar={hatirlaticilar.filter(r => r.hastaId === seciliHasta.id)} onKapat={() => { setModal(null); setSeciliHasta(null); }} onTedaviEkle={v => tedaviEkle(seciliHasta.id, v)} onSil={() => hastaSil(seciliHasta.id)} onNotlarGuncelle={n => hastaGuncelle(seciliHasta.id, { notlar: n })} tamamlaIsaretle={tamamlaIsaretle} bekleyeAl={bekleyeAl} kullanici={kullanici} isAdmin={isAdmin} bildirimGoster={bildirimGoster} islemListesi={islemListesi} iletisimKaydet={iletisimKaydet} />
       )}
@@ -220,7 +336,9 @@ export default function App() {
 function GlobalStiller() {
   return <style>{`
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+    html,body,#root{height:100%}
     *{box-sizing:border-box;margin:0;padding:0}
+    body{overflow-x:hidden}
     ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#d6cfc6;border-radius:4px}
     input,select,textarea{font-family:inherit;outline:none}
     input:focus,select:focus,textarea:focus{border-color:#1a1a2e!important;box-shadow:0 0 0 3px rgba(26,26,46,.07)!important}
@@ -236,6 +354,32 @@ function GlobalStiller() {
     .giris{background:#f8f6f3;border:1.5px solid #e4ddd5;border-radius:9px;padding:9px 13px;font-size:14px;color:#1a1a2e;width:100%;transition:all .2s}
     .etiket{border-radius:6px;padding:2px 9px;font-size:11px;font-weight:600;letter-spacing:.4px;display:inline-block}
     .mono{font-family:'JetBrains Mono',monospace}
+    .tableCard{-webkit-overflow-scrolling:touch}
+    .mobileScroll{max-width:100%}
+    @media (max-width:900px){
+      .appShell{height:auto!important;min-height:100vh;flex-direction:column!important;overflow:visible!important}
+      .appMain{overflow:visible!important;min-width:0}
+      .appContent{padding:16px!important;overflow:auto!important}
+      .sidebarShell{width:100%!important}
+      .menuToggle{display:none!important}
+      .topBar{height:auto!important;flex-wrap:wrap!important;align-items:flex-start!important;padding:12px 16px!important}
+      .topBarTitle{width:100%}
+      .topBarSearch{width:100%!important}
+      .grid2,.grid3,.grid4,.settingsGrid,.profileGrid{grid-template-columns:1fr!important}
+      .mobileWrap{flex-wrap:wrap!important}
+      .mobileScroll{width:100%!important;overflow-x:auto!important;-webkit-overflow-scrolling:touch}
+      .tableCard{overflow-x:auto!important}
+      .responsiveTable{min-width:720px}
+      .profileHeader{flex-direction:column!important;align-items:flex-start!important;gap:14px!important}
+      .profileActions{width:100%!important;flex-wrap:wrap!important}
+      .profileActions > *{flex:1 1 calc(50% - 8px)}
+      .modalBox{padding:20px!important;max-height:calc(100vh - 32px);overflow-y:auto}
+      input,select,textarea{font-size:16px}
+    }
+    @media (max-width:640px){
+      .responsiveTable{min-width:640px}
+      .profileActions > *{flex-basis:100%}
+    }
   `}</style>;
 }
 
@@ -319,7 +463,7 @@ function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisS
   const rRenk = gecmisSayisi > 0 ? "#e11d48" : "#d97706";
 
   return (
-    <div style={{ width: menuAcik ? 218 : 58, background: "#1a1a2e", display: "flex", flexDirection: "column", padding: "14px 8px", gap: 2, flexShrink: 0, transition: "width .25s ease", overflow: "hidden" }}>
+    <div className="sidebarShell" style={{ width: menuAcik ? 218 : 58, background: "#1a1a2e", display: "flex", flexDirection: "column", padding: "14px 8px", gap: 2, flexShrink: 0, transition: "width .25s ease", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: menuAcik ? "space-between" : "center", padding: "4px 4px 18px", marginBottom: 2 }}>
         {menuAcik && (
           <div style={{ paddingLeft: 4 }}>
@@ -327,7 +471,7 @@ function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisS
             <div style={{ fontSize: 17, fontWeight: 800, color: "#fff" }}>CRM <span style={{ color: "#e11d48", fontStyle: "italic" }}>Pro</span></div>
           </div>
         )}
-        <button onClick={() => setMenuAcik(!menuAcik)} style={{ background: "rgba(255,255,255,.08)", border: "none", borderRadius: 8, width: 30, height: 30, cursor: "pointer", color: "#9b9bbb", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <button className="menuToggle" onClick={() => setMenuAcik(!menuAcik)} style={{ background: "rgba(255,255,255,.08)", border: "none", borderRadius: 8, width: 30, height: 30, cursor: "pointer", color: "#9b9bbb", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
           {menuAcik ? "◀" : "▶"}
         </button>
       </div>
@@ -367,14 +511,15 @@ function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisS
 /* ══════════════════════════════════════════════════
    ÜST BAR
 ══════════════════════════════════════════════════ */
-function UstBar({ gorunum, onHastaEkle, onIceriAktar, hastaArama, setHastaArama, isAdmin }) {
+function UstBar({ gorunum, onHastaEkle, onIceriAktar, onDisaAktar, hastaArama, setHastaArama, isAdmin }) {
   const b = { panel: "Panel", hastalar: "Hasta Kayıtları", hatirlaticilar: "Hatırlatıcı Görevler", analitik: isAdmin ? "Analitik & Raporlar" : "Raporlarım", ozet: "AI Günlük Özet", ayarlar: "Sistem Ayarları" };
   return (
-    <div style={{ background: "#fff", borderBottom: "1px solid #ece7e0", padding: "0 26px", height: 56, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
-      <div style={{ fontSize: 17, fontWeight: 700, color: "#1a1a2e", flex: 1 }}>{b[gorunum] || ""}</div>
+    <div className="topBar" style={{ background: "#fff", borderBottom: "1px solid #ece7e0", padding: "0 26px", height: 56, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+      <div className="topBarTitle" style={{ fontSize: 17, fontWeight: 700, color: "#1a1a2e", flex: 1 }}>{b[gorunum] || ""}</div>
       {gorunum === "hastalar" && <>
-        <input className="giris" value={hastaArama} onChange={e => setHastaArama(e.target.value)} placeholder="İsim, telefon veya ID…" style={{ width: 240, padding: "7px 13px" }} />
-        {isAdmin && <Btn onClick={onIceriAktar} style={{ background: "#f1ede8", color: "#5a4a3a", padding: "7px 14px", fontSize: 13 }}>⬆ CSV</Btn>}
+        <input className="giris topBarSearch" value={hastaArama} onChange={e => setHastaArama(e.target.value)} placeholder="İsim, telefon veya ID…" style={{ width: 240, padding: "7px 13px" }} />
+        {isAdmin && <Btn onClick={onDisaAktar} style={{ background: "#eef5ff", color: "#1d4ed8", padding: "7px 14px", fontSize: 13, border: "1px solid #bfdbfe" }}>⬇ Dışa Aktar</Btn>}
+        {isAdmin && <Btn onClick={onIceriAktar} style={{ background: "#f1ede8", color: "#5a4a3a", padding: "7px 14px", fontSize: 13 }}>⬆ Excel</Btn>}
         <Btn onClick={onHastaEkle} koyu style={{ padding: "7px 16px", fontSize: 13 }}>+ Yeni Hasta</Btn>
       </>}
       {gorunum === "hatirlaticilar" && <Btn onClick={onHastaEkle} koyu style={{ padding: "7px 16px", fontSize: 13 }}>+ Yeni Hasta</Btn>}
@@ -398,10 +543,10 @@ function Panel({ hastalar, tedaviler, hastaHaritasi, bugunHat, gecmisHat, gelece
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+      <div className="grid3" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
         {ist.map(s => <IstatistikKarti key={s.e} etiket={s.e} deger={s.d} renk={s.r} arkaplan={s.a} kenar={s.k} onClick={s.fn} />)}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "3fr 2fr", gap: 18 }}>
+      <div className="grid2" style={{ display: "grid", gridTemplateColumns: "3fr 2fr", gap: 18 }}>
         <div className="kart" style={{ padding: 20 }}>
           <BolumBasligi ikon={gecmisHat.length ? "🔴" : "📞"} baslik="Acil & Bugün" titreme={gecmisHat.length > 0} />
           {acil.length === 0 ? <Bos metin="Harika! Acil hatırlatıcı yok." /> : acil.map(r => {
@@ -452,8 +597,8 @@ function Panel({ hastalar, tedaviler, hastaHaritasi, bugunHat, gecmisHat, gelece
 ══════════════════════════════════════════════════ */
 function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, kullanici, iletisimKaydet }) {
   return (
-    <div className="kart" style={{ overflow: "hidden" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    <div className="kart tableCard" style={{ overflow: "hidden" }}>
+      <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ background: "#f8f6f3", borderBottom: "1px solid #ece7e0" }}>
             {["Hasta ID", "İsim & Notlar", "Telefon", "Tedavi", "Bekleyen", "Son Ziyaret", ""].map(b => (
@@ -510,14 +655,14 @@ function HatirlaticiPanosu({ hatirlaticilar, tumHatirlaticilar, hastaHaritasi, h
   ];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ display: "flex", gap: 6, background: "#fff", borderRadius: 12, padding: 4, border: "1px solid #ece7e0", width: "fit-content" }}>
+      <div className="mobileScroll" style={{ display: "flex", gap: 6, background: "#fff", borderRadius: 12, padding: 4, border: "1px solid #ece7e0", width: "fit-content" }}>
         {sek.map(s => (
           <button key={s.k} className="btn" onClick={() => setHatTab(s.k)} style={{ background: hatTab === s.k ? "#1a1a2e" : "transparent", color: hatTab === s.k ? "#fff" : "#78706a", padding: "7px 14px", fontSize: 13, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
             {s.e} <span className="mono" style={{ background: hatTab === s.k ? "rgba(255,255,255,.2)" : "#f1ede8", color: hatTab === s.k ? "#fff" : s.r, borderRadius: 10, padding: "1px 6px", fontSize: 10 }}>{s.s}</span>
           </button>
         ))}
       </div>
-      <div style={{ display: "flex", gap: 10 }}>
+      <div className="mobileWrap" style={{ display: "flex", gap: 10 }}>
         <select className="giris" value={filtreIslem} onChange={e => setFiltreIslem(e.target.value)} style={{ width: "auto" }}>
           <option value="Tümü">Tüm İşlemler</option>
           {islemListesi.map(i => <option key={i.id}>{i.isim}</option>)}
@@ -528,8 +673,8 @@ function HatirlaticiPanosu({ hatirlaticilar, tumHatirlaticilar, hastaHaritasi, h
         </select>
         <span style={{ marginLeft: "auto", fontSize: 13, color: "#9b8f88", alignSelf: "center" }}>{hatirlaticilar.length} hatırlatıcı</span>
       </div>
-      <div className="kart" style={{ overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <div className="kart tableCard" style={{ overflow: "hidden" }}>
+        <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: "#f8f6f3", borderBottom: "1px solid #ece7e0" }}>
               {["Hasta", "İşlem", "Hatırlatıcı", "Tarih", "Gün", "Atanan", "Durum", "İşlemler"].map(b => (
@@ -631,7 +776,7 @@ function Analitik({ hastalar, tedaviler, hatirlaticilar, tamamlananHat, toplamGe
       {!isAdmin && (
         <div className="kart" style={{ padding: 20, background: "#f0fdf4", border: "1px solid #a7f3d0" }}>
           <div style={{ fontWeight: 700, fontSize: 15, color: "#059669", marginBottom: 12 }}>📊 Benim Performansım</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+          <div className="grid3" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
             {[{ e: "Yaptığım İşlem", d: benimTedaviler.length, r: "#7c3aed" }, { e: "Upsales Sayısı", d: upTx.length, r: "#ca8a04" }, { e: "Upsales Tutarım", d: paraFmt(topUp), r: "#059669" }].map(s => (
               <div key={s.e} style={{ background: "#fff", borderRadius: 10, padding: "12px 14px" }}>
                 <div className="mono" style={{ fontSize: 20, fontWeight: 700, color: s.r }}>{s.d}</div>
@@ -642,13 +787,13 @@ function Analitik({ hastalar, tedaviler, hatirlaticilar, tamamlananHat, toplamGe
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 6, background: "#fff", borderRadius: 12, padding: 4, border: "1px solid #ece7e0", width: "fit-content" }}>
+      <div className="mobileScroll" style={{ display: "flex", gap: 6, background: "#fff", borderRadius: 12, padding: 4, border: "1px solid #ece7e0", width: "fit-content" }}>
         {sekmeler.map(s => <button key={s.k} className="btn" onClick={() => setTab(s.k)} style={{ background: tab === s.k ? "#1a1a2e" : "transparent", color: tab === s.k ? "#fff" : "#78706a", padding: "7px 16px", fontSize: 13, fontFamily: "inherit" }}>{s.e}</button>)}
       </div>
 
       {/* GENEL (sadece admin) */}
       {tab === "genel" && isAdmin && <>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        <div className="grid4" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
           {[{ e: "Toplam Ciro", d: paraFmt(toplamGelir), r: "#0369a1" }, { e: "Bu Ay Ciro", d: paraFmt(aylikGelir), r: "#059669" }, { e: "Toplam Upsales", d: paraFmt(tedaviler.filter(t => t.upsales).reduce((s, t) => s + t.upsalesFiyat, 0)), r: "#ca8a04" }, { e: "Tamamlanma Oranı", d: `%${oran}`, r: "#7c3aed" }].map(k => (
             <div key={k.e} className="kart" style={{ padding: "18px 20px" }}>
               <div className="mono" style={{ fontSize: 24, fontWeight: 700, color: k.r }}>{k.d}</div>
@@ -675,8 +820,8 @@ function Analitik({ hastalar, tedaviler, hatirlaticilar, tamamlananHat, toplamGe
 
       {/* PERSONEL RAPORU (sadece admin) */}
       {tab === "personel" && isAdmin && (
-        <div className="kart" style={{ overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="kart tableCard" style={{ overflow: "hidden" }}>
+          <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr style={{ background: "#f8f6f3", borderBottom: "1px solid #ece7e0" }}>{["Personel", "Rol", "İşlem", "Toplam Satış", "Upsales", "📞 Arama", "💬 WhatsApp"].map(b => <th key={b} style={{ padding: "11px 14px", textAlign: "left", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#9b8f88", fontWeight: 500 }}>{b}</th>)}</tr></thead>
             <tbody>
               {perSatis.map(p => (
@@ -697,7 +842,7 @@ function Analitik({ hastalar, tedaviler, hatirlaticilar, tamamlananHat, toplamGe
 
       {/* UPSALES (admin hepsini, personel kendini) */}
       {tab === "upsales" && <>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        <div className="grid3" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
           {[{ e: isAdmin ? "Toplam Upsales" : "Benim Upsalesim", d: paraFmt(topUp), r: "#ca8a04" }, { e: "Bu Ay", d: paraFmt(ayUp), r: "#059669" }, { e: "Upsales Sayısı", d: upTx.length, r: "#7c3aed" }].map(k => (
             <div key={k.e} className="kart" style={{ padding: "18px 20px" }}>
               <div className="mono" style={{ fontSize: 24, fontWeight: 700, color: k.r }}>{k.d}</div>
@@ -705,8 +850,8 @@ function Analitik({ hastalar, tedaviler, hatirlaticilar, tamamlananHat, toplamGe
             </div>
           ))}
         </div>
-        <div className="kart" style={{ overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="kart tableCard" style={{ overflow: "hidden" }}>
+          <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr style={{ background: "#fefce8", borderBottom: "1px solid #fde68a" }}>{["Ana İşlem", "Upsales İşlem", "Upsales Tutarı", "Personel", "Tarih"].map(b => <th key={b} style={{ padding: "10px 14px", textAlign: "left", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#92400e", fontWeight: 500 }}>{b}</th>)}</tr></thead>
             <tbody>
               {upTx.length === 0 && <tr><td colSpan={5} style={{ padding: 40, textAlign: "center", color: "#b0a89e" }}>Henüz upsales kaydı yok</td></tr>}
@@ -726,8 +871,8 @@ function Analitik({ hastalar, tedaviler, hatirlaticilar, tamamlananHat, toplamGe
 
       {/* İLETİŞİM (admin hepsini, personel kendini) */}
       {tab === "iletisim" && (
-        <div className="kart" style={{ overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="kart tableCard" style={{ overflow: "hidden" }}>
+          <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr style={{ background: "#f8f6f3", borderBottom: "1px solid #ece7e0" }}>{["Tarih & Saat", "Hasta", "Personel", "Yöntem", "Hatırlatıcı"].map(b => <th key={b} style={{ padding: "10px 14px", textAlign: "left", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#9b8f88", fontWeight: 500 }}>{b}</th>)}</tr></thead>
             <tbody>
               {(isAdmin ? iletisimLog : iletisimLog.filter(l => l.personel === kullanici?.isim)).length === 0 && <tr><td colSpan={5} style={{ padding: 40, textAlign: "center", color: "#b0a89e" }}>Henüz iletişim kaydı yok</td></tr>}
@@ -782,22 +927,22 @@ function Ayarlar({ personelListesi, onPersonelGuncelle, islemListesi, onIslemGun
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18, maxWidth: 860 }}>
-      <div style={{ display: "flex", gap: 6, background: "#fff", borderRadius: 12, padding: 4, border: "1px solid #ece7e0", width: "fit-content" }}>
+      <div className="mobileScroll" style={{ display: "flex", gap: 6, background: "#fff", borderRadius: 12, padding: 4, border: "1px solid #ece7e0", width: "fit-content" }}>
         {[{ k: "personel", e: "👥 Personel Yönetimi" }, { k: "islem", e: "🧴 İşlem & Hatırlatıcı Ayarları" }].map(s => (
           <button key={s.k} className="btn" onClick={() => setTab(s.k)} style={{ background: tab === s.k ? "#1a1a2e" : "transparent", color: tab === s.k ? "#fff" : "#78706a", padding: "7px 18px", fontSize: 13, fontFamily: "inherit" }}>{s.e}</button>
         ))}
       </div>
 
       {tab === "personel" && <>
-        <div className="kart" style={{ overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="kart tableCard" style={{ overflow: "hidden" }}>
+          <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr style={{ background: "#f8f6f3", borderBottom: "1px solid #ece7e0" }}>{["Personel", "Rol", "PIN", "İşlem"].map(b => <th key={b} style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#9b8f88", fontWeight: 500 }}>{b}</th>)}</tr></thead>
             <tbody>{personeller.map(p => <PersonelSatiri key={p.id} p={p} onSil={personelSil} onPinGuncelle={pinGuncelle} />)}</tbody>
           </table>
         </div>
         <div className="kart" style={{ padding: 20 }}>
           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14 }}>➕ Yeni Personel Ekle</div>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: 10, alignItems: "flex-end" }}>
+          <div className="settingsGrid" style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: 10, alignItems: "flex-end" }}>
             <div><div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 5 }}>Ad Soyad</div><input className="giris" placeholder="İsim Soyisim" value={yeniP.isim} onChange={e => setYeniP(p => ({ ...p, isim: e.target.value }))} /></div>
             <div><div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 5 }}>Rol</div><select className="giris" value={yeniP.rol} onChange={e => setYeniP(p => ({ ...p, rol: e.target.value }))}><option value="personel">Personel</option><option value="admin">Admin</option></select></div>
             <div><div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 5 }}>PIN {yeniP.rol === "admin" ? "(6 hane)" : "(4-6 hane)"}</div><input className="giris" placeholder="PIN" type="password" maxLength={6} value={yeniP.pin} onChange={e => setYeniP(p => ({ ...p, pin: e.target.value }))} /></div>
@@ -828,7 +973,7 @@ function Ayarlar({ personelListesi, onPersonelGuncelle, islemListesi, onIslemGun
         ))}
         <div className="kart" style={{ padding: 20 }}>
           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14 }}>➕ Yeni İşlem Türü Ekle</div>
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+          <div className="mobileWrap" style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
             <div style={{ flex: 1 }}><div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 5 }}>İşlem Adı</div><input className="giris" placeholder="Örn: PRP, Hydrafacial, Plazma…" value={yeniI.isim} onChange={e => setYeniI(p => ({ ...p, isim: e.target.value }))} /></div>
             <div><div style={{ fontSize: 12, color: "#9b8f88", marginBottom: 5 }}>Renk</div><input type="color" value={yeniI.renk} onChange={e => setYeniI(p => ({ ...p, renk: e.target.value }))} style={{ width: 46, height: 40, border: "1.5px solid #e4ddd5", borderRadius: 9, cursor: "pointer", padding: 2 }} /></div>
             <Btn onClick={islemEkle} koyu style={{ padding: "9px 20px" }}>+ Ekle</Btn>
@@ -906,9 +1051,9 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 9000, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "28px 16px", backdropFilter: "blur(5px)", overflowY: "auto" }} onClick={onKapat}>
-      <div style={{ background: "#fff", borderRadius: 22, width: 940, maxWidth: "100%", boxShadow: "0 40px 100px rgba(0,0,0,.3)", animation: "yukariCik .25s ease", overflow: "hidden" }} onClick={e => e.stopPropagation()}>
+      <div className="profileModalBox" style={{ background: "#fff", borderRadius: 22, width: 940, maxWidth: "100%", boxShadow: "0 40px 100px rgba(0,0,0,.3)", animation: "yukariCik .25s ease", overflow: "hidden" }} onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div style={{ background: "linear-gradient(135deg,#1a1a2e,#16213e)", padding: "22px 26px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div className="profileHeader" style={{ background: "linear-gradient(135deg,#1a1a2e,#16213e)", padding: "22px 26px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <Avatar isim={hasta.isim} boyut={48} />
             <div>
@@ -916,7 +1061,7 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
               <div className="mono" style={{ fontSize: 11, color: "#9b9bbb" }}>ID: {hasta.id}</div>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div className="profileActions" style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <a href={`tel:${hasta.telefon}`} onClick={() => iletisimKaydet(hasta.id, hasta.isim, "Arama", kullanici?.isim, "—")}>
               <Btn style={{ background: "rgba(255,255,255,.12)", color: "#fff" }}>📞 {hasta.telefon}</Btn>
             </a>
@@ -928,11 +1073,11 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
           </div>
         </div>
 
-        <div style={{ padding: 24, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+        <div className="profileGrid" style={{ padding: 24, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
           {/* Sol */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {/* İstatistikler */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+            <div className="grid3" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
               {[
                 { e: "Tedavi",   d: tedaviler.length,               r: "#7c3aed" },
                 { e: "Bekleyen", d: bekleyenHat.length,             r: "#e11d48" },
@@ -977,14 +1122,14 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
                       ⬆ Upsales yapıldı mı?
                     </label>
                     {txForm.upsales && (
-                      <div style={{ display: "flex", gap: 9, marginTop: 12 }}>
+                      <div className="mobileWrap" style={{ display: "flex", gap: 9, marginTop: 12 }}>
                         <input className="giris" placeholder="Upsales işlem adı (ör: Serum, Maske…)" value={txForm.upsalesIslem} onChange={e => setTxForm(f => ({ ...f, upsalesIslem: e.target.value }))} style={{ flex: 2 }} />
                         <input className="giris" type="number" placeholder="₺ Tutar" value={txForm.upsalesFiyat} onChange={e => setTxForm(f => ({ ...f, upsalesFiyat: e.target.value }))} style={{ flex: 1 }} />
                       </div>
                     )}
                   </div>
 
-                  <div style={{ display: "flex", gap: 8 }}>
+                  <div className="mobileWrap" style={{ display: "flex", gap: 8 }}>
                     <Btn onClick={() => setTedaviEk(false)} style={{ background: "#f1ede8", color: "#78706a", flex: 1 }}>İptal</Btn>
                     <Btn onClick={tedaviKaydet} koyu style={{ flex: 2, fontWeight: 700 }}>Tedaviyi Kaydet</Btn>
                   </div>
@@ -1104,7 +1249,7 @@ function OzetPaneli({ hastalar, hatirlaticilar, hastaHaritasi, bugunHat, gecmisH
     <div style={{ maxWidth: 720, display: "flex", flexDirection: "column", gap: 18 }}>
       <div className="kart" style={{ padding: 24 }}>
         <BolumBasligi ikon="✉" baslik="AI Günlük Brifing" />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, margin: "16px 0" }}>
+        <div className="grid3" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, margin: "16px 0" }}>
           {[{ i: "🔴", e: "Geçmiş", d: gecmisHat.length, r: "#e11d48" }, { i: "📞", e: "Bugün", d: bugunHat.length, r: "#d97706" }, { i: "👥", e: "Hastalar", d: hastalar.length, r: "#7c3aed" }].map(s => (
             <div key={s.e} style={{ background: "#f8f6f3", borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10 }}>
               <span style={{ fontSize: 20 }}>{s.i}</span>
@@ -1112,7 +1257,7 @@ function OzetPaneli({ hastalar, hatirlaticilar, hastaHaritasi, bugunHat, gecmisH
             </div>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div className="mobileWrap" style={{ display: "flex", gap: 10 }}>
           <button className="btn" onClick={ozetOlustur} disabled={yukl} style={{ background: "#1a1a2e", color: "#fff", padding: "11px 22px", fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
             {yukl ? <><span style={{ width: 14, height: 14, border: "2px solid #fff", borderTopColor: "transparent", borderRadius: "50%", display: "inline-block", animation: "don 1s linear infinite" }} /> Oluşturuluyor…</> : "✨ Brifing Oluştur"}
           </button>
@@ -1132,31 +1277,131 @@ function OzetPaneli({ hastalar, hatirlaticilar, hastaHaritasi, bugunHat, gecmisH
    MODALLER
 ══════════════════════════════════════════════════ */
 function HastaEkleModal({ onKapat, onKaydet }) {
-  const [f, setF] = useState({ isim: "", telefon: "", notlar: "" });
+  const [f, setF] = useState({ isim: "", ulkeKodu: VARSAYILAN_ULKE_KODU, telefon: "", notlar: "" });
+  const kaydet = async () => {
+    if (!f.isim || !f.telefon) return;
+    const kaydedildi = await onKaydet({ isim: f.isim, ulkeKodu: f.ulkeKodu, telefon: telefonuBirlestir(f.ulkeKodu, f.telefon), notlar: f.notlar });
+    if (kaydedildi) onKapat();
+  };
   return (
     <Modal onKapat={onKapat} baslik="Yeni Hasta Ekle">
       <Alan etiket="Ad Soyad *"><input className="giris" value={f.isim} onChange={e => setF(p => ({ ...p, isim: e.target.value }))} placeholder="Ayşe Yılmaz" autoFocus /></Alan>
-      <Alan etiket="Telefon Numarası *"><input className="giris" value={f.telefon} onChange={e => setF(p => ({ ...p, telefon: e.target.value }))} placeholder="+90 532 000 0000" /></Alan>
+      <Alan etiket="Telefon Numarası *">
+        <div className="mobileWrap" style={{ display: "flex", gap: 8 }}>
+          <input className="giris" value={f.ulkeKodu} onChange={e => setF(p => ({ ...p, ulkeKodu: e.target.value.startsWith("+") ? e.target.value : `+${e.target.value.replace(/\+/g, "")}` }))} placeholder="+90" style={{ maxWidth: 100 }} />
+          <input className="giris" type="tel" value={f.telefon} onChange={e => setF(p => ({ ...p, telefon: e.target.value }))} placeholder="532 000 0000" style={{ flex: 1 }} />
+        </div>
+      </Alan>
       <Alan etiket="Notlar"><textarea className="giris" rows={3} value={f.notlar} onChange={e => setF(p => ({ ...p, notlar: e.target.value }))} placeholder="Alerji, tercih…" style={{ resize: "none" }} /></Alan>
-      <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+      <div className="mobileWrap" style={{ display: "flex", gap: 10, marginTop: 20 }}>
         <Btn onClick={onKapat} style={{ flex: 1, background: "#f1ede8", color: "#78706a", padding: 11 }}>İptal</Btn>
-        <Btn koyu onClick={() => { if (!f.isim || !f.telefon) return; if (onKaydet({ isim: f.isim, telefon: f.telefon, notlar: f.notlar })) onKapat(); }} style={{ flex: 2, padding: 11, fontWeight: 700 }}>Hasta Ekle</Btn>
+        <Btn koyu onClick={kaydet} style={{ flex: 2, padding: 11, fontWeight: 700 }}>Hasta Ekle</Btn>
       </div>
     </Modal>
   );
 }
 
 function IceriAktarModal({ onKapat, onAktar }) {
-  const [metin, setMetin] = useState("");
-  const sablon = `isim,telefon,islem,tarih,fiyat,notlar\nAyşe Yılmaz,+90 532 000 0001,Botox,2026-03-15,1200,Alın\nFatma Kaya,+90 532 000 0002,Filler,2026-02-20,2200,Yanak`;
+  const [dosyaAdi, setDosyaAdi] = useState("");
+  const [kayitlar, setKayitlar] = useState([]);
+  const [hazirlaniyor, setHazirlaniyor] = useState(false);
+  const [aktariliyor, setAktariliyor] = useState(false);
+  const [hata, setHata] = useState("");
+
+  const sablonIndir = async () => {
+    const XLSX = await import("xlsx");
+    const ws = XLSX.utils.aoa_to_sheet([
+      ["isim", "telefon", "islem", "tarih", "fiyat", "notlar"],
+      ["Ayşe Yılmaz", "+90 532 000 0001", "Botox", "2026-03-15", "1200", "Alın"],
+      ["Fatma Kaya", "+90 532 000 0002", "Filler", "2026-02-20", "2200", "Yanak"],
+    ]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Hastalar");
+    XLSX.writeFile(wb, "hasta-aktarim-sablonu.xlsx");
+  };
+
+  const dosyaOku = async (dosya) => {
+    if (!dosya) return;
+    setHazirlaniyor(true);
+    setHata("");
+    try {
+      const XLSX = await import("xlsx");
+      const buffer = await dosya.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: "array", cellDates: true });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const satirlar = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: true });
+      const cozulmus = satirlar
+        .map(satir => ({
+          isim: String(alanDegeriBul(satir, EXCEL_ALANLARI.isim) || "").trim(),
+          telefon: String(alanDegeriBul(satir, EXCEL_ALANLARI.telefon) || "").trim(),
+          islem: String(alanDegeriBul(satir, EXCEL_ALANLARI.islem) || "").trim(),
+          tarih: excelTarihiniNormalizeEt(alanDegeriBul(satir, EXCEL_ALANLARI.tarih)),
+          fiyat: String(alanDegeriBul(satir, EXCEL_ALANLARI.fiyat) || "").trim(),
+          notlar: String(alanDegeriBul(satir, EXCEL_ALANLARI.notlar) || "").trim(),
+        }))
+        .filter(kayit => Object.values(kayit).some(Boolean));
+
+      if (!cozulmus.length) throw new Error("Dosyada okunabilir satır bulunamadı.");
+
+      setDosyaAdi(dosya.name);
+      setKayitlar(cozulmus);
+    } catch {
+      setDosyaAdi("");
+      setKayitlar([]);
+      setHata("Dosya okunamadı. İlk satırda kolon başlıkları olduğundan emin olun.");
+    } finally {
+      setHazirlaniyor(false);
+    }
+  };
+
+  const aktar = async () => {
+    if (!kayitlar.length) return;
+    setAktariliyor(true);
+    await onAktar(kayitlar);
+    setAktariliyor(false);
+    onKapat();
+  };
+
   return (
-    <Modal onKapat={onKapat} baslik="CSV'den İçe Aktar">
-      <p style={{ fontSize: 13, color: "#78706a", marginBottom: 10, lineHeight: 1.6 }}>Zorunlu: <code style={{ background: "#f1ede8", padding: "1px 5px", borderRadius: 4 }}>isim, telefon</code>. İsteğe bağlı: islem, tarih, fiyat, notlar</p>
-      <div style={{ background: "#f8f6f3", borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 11, color: "#9b8f88", fontFamily: "monospace", whiteSpace: "pre-wrap", border: "1px dashed #d6cfc6" }}>{sablon}</div>
-      <textarea className="giris" rows={8} value={metin} onChange={e => setMetin(e.target.value)} placeholder="CSV verisi buraya…" style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }} />
-      <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+    <Modal onKapat={onKapat} baslik="Excel'den İçe Aktar">
+      <p style={{ fontSize: 13, color: "#78706a", marginBottom: 12, lineHeight: 1.6 }}>
+        Excel, CSV veya Numbers'tan dışa aktarılan dosyayı yükleyin. Zorunlu sütunlar:
+        {" "}<code style={{ background: "#f1ede8", padding: "1px 5px", borderRadius: 4 }}>isim</code>
+        {" "}<code style={{ background: "#f1ede8", padding: "1px 5px", borderRadius: 4 }}>telefon</code>.
+      </p>
+
+      <div style={{ background: "#f8f6f3", borderRadius: 10, padding: 12, marginBottom: 12, border: "1px dashed #d6cfc6" }}>
+        <div style={{ fontSize: 12, color: "#78706a", marginBottom: 8, fontWeight: 600 }}>Desteklenen sütunlar</div>
+        <div style={{ fontSize: 12, color: "#9b8f88", lineHeight: 1.7 }}>
+          isim, telefon, islem, tarih, fiyat, notlar
+        </div>
+      </div>
+
+      <div className="mobileWrap" style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        <Btn onClick={sablonIndir} style={{ background: "#f1ede8", color: "#5a4a3a" }}>Şablonu İndir</Btn>
+        <label className="btn" style={{ background: "#fff", border: "1px dashed #d6cfc6", color: "#5a4a3a", padding: "8px 16px", display: "inline-flex", alignItems: "center" }}>
+          Dosya Seç
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={e => dosyaOku(e.target.files?.[0])} style={{ display: "none" }} />
+        </label>
+      </div>
+
+      <div style={{ background: "#f8f6f3", borderRadius: 10, padding: 12, border: "1px solid #ece7e0", minHeight: 84 }}>
+        {hazirlaniyor && <div style={{ fontSize: 13, color: "#78706a" }}>Dosya hazırlanıyor…</div>}
+        {!hazirlaniyor && !dosyaAdi && !hata && <div style={{ fontSize: 13, color: "#9b8f88" }}>Henüz dosya seçilmedi.</div>}
+        {!hazirlaniyor && dosyaAdi && (
+          <>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#1a1a2e", marginBottom: 4 }}>{dosyaAdi}</div>
+            <div style={{ fontSize: 12, color: "#78706a" }}>{kayitlar.length} satır içe aktarmaya hazır.</div>
+          </>
+        )}
+        {!hazirlaniyor && hata && <div style={{ fontSize: 13, color: "#e11d48" }}>{hata}</div>}
+      </div>
+
+      <div className="mobileWrap" style={{ display: "flex", gap: 10, marginTop: 14 }}>
         <Btn onClick={onKapat} style={{ flex: 1, background: "#f1ede8", color: "#78706a", padding: 11 }}>İptal</Btn>
-        <Btn koyu onClick={() => { if (metin.trim()) onAktar(metin); }} style={{ flex: 2, padding: 11, fontWeight: 700 }}>⬆ İçe Aktar</Btn>
+        <Btn koyu onClick={aktar} disabled={!kayitlar.length || hazirlaniyor || aktariliyor} style={{ flex: 2, padding: 11, fontWeight: 700 }}>
+          {aktariliyor ? "Aktarılıyor…" : "⬆ İçe Aktar"}
+        </Btn>
       </div>
     </Modal>
   );
@@ -1199,7 +1444,7 @@ function Alan({ etiket, children }) {
 function Modal({ children, onKapat, baslik }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)" }} onClick={onKapat}>
-      <div style={{ background: "#fff", borderRadius: 18, padding: 28, width: 480, maxWidth: "95vw", animation: "yukariCik .25s ease", boxShadow: "0 24px 80px rgba(0,0,0,.25)" }} onClick={e => e.stopPropagation()}>
+      <div className="modalBox" style={{ background: "#fff", borderRadius: 18, padding: 28, width: 480, maxWidth: "95vw", animation: "yukariCik .25s ease", boxShadow: "0 24px 80px rgba(0,0,0,.25)" }} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e", marginBottom: 20 }}>{baslik}</div>
         {children}
       </div>
