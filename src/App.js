@@ -5,6 +5,8 @@ import { supabase } from "./supabase";
    SABİTLER & YARDIMCILAR
 ══════════════════════════════════════════════════ */
 const KLINIK_ADI = "Candemir Ceran Clinic";
+const AUTH_EMAIL = "admin@ceranclinic.com";
+const AUTH_ENABLED = false;
 
 const VARSAYILAN_PERSONEL = [
   { id: "p1", isim: "Dr. Candemir Ceran", rol: "admin",    pin: "654321" },
@@ -89,6 +91,29 @@ const excelTarihiniNormalizeEt = (deger) => {
 const lsAl      = (k, v) => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : v; } catch { return v; } };
 const lsKaydet  = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 const paraFmt   = (n) => `₺${Number(n || 0).toLocaleString("tr-TR")}`;
+const CSV_IMPORT_LIMIT = 9999;
+const COP_KUTUSU_GUN = 45;
+const SUPABASE_PAGE_SIZE = 1000;
+const TABLES = {
+  patients: "patients",
+  treatments: "treatments",
+  reminders: "reminders",
+  settings: "app_settings",
+};
+const supabaseTumKayitlar = async (table, orderColumn, ascending = false) => {
+  const kayitlar = [];
+  for (let from = 0; ; from += SUPABASE_PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .order(orderColumn, { ascending })
+      .range(from, from + SUPABASE_PAGE_SIZE - 1);
+    if (error) throw error;
+    kayitlar.push(...(data || []));
+    if (!data || data.length < SUPABASE_PAGE_SIZE) break;
+  }
+  return kayitlar;
+};
 
 /* ══════════════════════════════════════════════════
    ANA UYGULAMA
@@ -102,9 +127,13 @@ export default function App() {
   const [personelListesi, setPersonelListesi] = useState(() => lsAl("klinik_personel", VARSAYILAN_PERSONEL));
   const [islemListesi,    setIslemListesi]    = useState(() => lsAl("klinik_islemler",  VARSAYILAN_ISLEMLER));
   const [kullanici,       setKullanici]       = useState(() => lsAl("klinik_oturum",   null));
+  const [authSession,     setAuthSession]     = useState(null);
+  const [authHazir,       setAuthHazir]       = useState(false);
+  const [ayarlarHazir,    setAyarlarHazir]    = useState(false);
   const [gorunum,         setGorunum]         = useState("panel");
   const [modal,           setModal]           = useState(null);
   const [seciliHasta,     setSeciliHasta]     = useState(null);
+  const [profilTedaviAc,  setProfilTedaviAc]  = useState(false);
   const [bildirim,        setBildirim]        = useState(null);
   const [hatTab,          setHatTab]          = useState("bugun");
   const [hastaArama,      setHastaArama]      = useState("");
@@ -128,39 +157,109 @@ export default function App() {
   const bildirimGoster = (msg, tip = "tamam") => { setBildirim({ msg, tip }); setTimeout(() => setBildirim(null), 3200); };
   const isAdmin = kullanici?.rol === "admin";
 
-  const personelGuncelle = (l) => { setPersonelListesi(l); lsKaydet("klinik_personel", l); };
-  const islemGuncelle    = (l) => { setIslemListesi(l);    lsKaydet("klinik_islemler",  l); };
+  useEffect(() => {
+    if (!AUTH_ENABLED) {
+      setAuthHazir(true);
+      return;
+    }
+    let aktif = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!aktif) return;
+      setAuthSession(data.session || null);
+      setAuthHazir(true);
+    });
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthSession(session || null);
+      setAuthHazir(true);
+      if (!session) {
+        setKullanici(null);
+        lsKaydet("klinik_oturum", null);
+      }
+    });
+    return () => {
+      aktif = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  const ayarKaydet = async (key, value) => {
+    const { error } = await supabase.from(TABLES.settings).upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) bildirimGoster("Ayar buluta kaydedilemedi: " + error.message, "uyari");
+  };
+  const personelGuncelle = (l) => { setPersonelListesi(l); lsKaydet("klinik_personel", l); ayarKaydet("personel", l); };
+  const islemGuncelle    = (l) => { setIslemListesi(l);    lsKaydet("klinik_islemler",  l); ayarKaydet("islemler", l); };
   const oturumAc         = (u) => { setKullanici(u);       lsKaydet("klinik_oturum",    u); };
-  const oturumKapat      = ()  => { setKullanici(null);    lsKaydet("klinik_oturum",    null); };
+  const authGiris = async (email, sifre) => {
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: sifre });
+    if (error) {
+      bildirimGoster("E-posta veya şifre hatalı", "hata");
+      return false;
+    }
+    return true;
+  };
+  const oturumKapat = async () => {
+    setKullanici(null);
+    lsKaydet("klinik_oturum", null);
+    await supabase.auth.signOut();
+    setAuthSession(null);
+  };
 
   const iletisimKaydet = (hastaId, hastaIsim, yontem, personelIsim, etiket) => {
     const log = { id: uid(), hastaId, hastaIsim, yontem, personel: personelIsim, etiket, tarih: bugun(), saat: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }) };
     setIletisimLog(prev => { const y = [log, ...prev].slice(0, 500); lsKaydet("klinik_log", y); return y; });
   };
 
+  useEffect(() => {
+    if (AUTH_ENABLED && !authSession) {
+      setAyarlarHazir(false);
+      return;
+    }
+    let iptal = false;
+    const ayarlariYukle = async () => {
+      const { data, error } = await supabase.from(TABLES.settings).select("key,value").in("key", ["personel", "islemler"]);
+      if (!iptal && !error && data) {
+        const uzakPersonel = data.find(x => x.key === "personel")?.value;
+        const uzakIslemler = data.find(x => x.key === "islemler")?.value;
+        if (Array.isArray(uzakPersonel) && uzakPersonel.length) { setPersonelListesi(uzakPersonel); lsKaydet("klinik_personel", uzakPersonel); }
+        if (Array.isArray(uzakIslemler) && uzakIslemler.length) { setIslemListesi(uzakIslemler); lsKaydet("klinik_islemler", uzakIslemler); }
+      }
+      if (!iptal) setAyarlarHazir(true);
+    };
+    ayarlariYukle();
+    const kanal = supabase.channel(`${TABLES.settings}_ch`).on("postgres_changes", { event: "*", schema: "public", table: TABLES.settings }, ayarlariYukle).subscribe();
+    return () => { iptal = true; supabase.removeChannel(kanal); };
+  }, [authSession]);
+
   /* ── Supabase ── */
   useEffect(() => {
-    if (!kullanici) return;
+    if ((AUTH_ENABLED && !authSession) || !kullanici) return;
     const yukle = async () => {
       setYukleniyor(true);
-      const [{ data: h }, { data: t }, { data: r }] = await Promise.all([
-        supabase.from("patients").select("*").order("created_at", { ascending: false }),
-        supabase.from("treatments").select("*").order("date", { ascending: false }),
-        supabase.from("reminders").select("*").order("due_date", { ascending: true }),
-      ]);
-      if (h) setHastalar(h.map(mH));
-      if (t) setTedaviler(t.map(mT));
-      if (r) setHatirlaticilar(r.map(mR));
+      try {
+        const [h, t, r] = await Promise.all([
+          supabaseTumKayitlar(TABLES.patients, "created_at", false),
+          supabaseTumKayitlar(TABLES.treatments, "date", false),
+          supabaseTumKayitlar(TABLES.reminders, "due_date", true),
+        ]);
+        const zamanAsimi = Date.now() - COP_KUTUSU_GUN * 86400000;
+        const suresiDolan = h.filter(x => x.deleted_at && new Date(x.deleted_at).getTime() < zamanAsimi).map(x => x.id);
+        if (suresiDolan.length) await supabase.from(TABLES.patients).delete().in("id", suresiDolan);
+        setHastalar(h.filter(x => !suresiDolan.includes(x.id)).map(mH));
+        setTedaviler(t.map(mT));
+        setHatirlaticilar(r.map(mR));
+      } catch (error) {
+        bildirimGoster("Veriler yüklenemedi: " + error.message, "hata");
+      }
       setYukleniyor(false);
     };
     yukle();
-    const kH = supabase.channel("ch_p").on("postgres_changes", { event: "*", schema: "public", table: "patients"   }, yukle).subscribe();
-    const kT = supabase.channel("ch_t").on("postgres_changes", { event: "*", schema: "public", table: "treatments" }, yukle).subscribe();
-    const kR = supabase.channel("ch_r").on("postgres_changes", { event: "*", schema: "public", table: "reminders"  }, yukle).subscribe();
+    const kH = supabase.channel("ch_p").on("postgres_changes", { event: "*", schema: "public", table: TABLES.patients   }, yukle).subscribe();
+    const kT = supabase.channel("ch_t").on("postgres_changes", { event: "*", schema: "public", table: TABLES.treatments }, yukle).subscribe();
+    const kR = supabase.channel("ch_r").on("postgres_changes", { event: "*", schema: "public", table: TABLES.reminders  }, yukle).subscribe();
     return () => { supabase.removeChannel(kH); supabase.removeChannel(kT); supabase.removeChannel(kR); };
-  }, [kullanici]);
+  }, [authSession, kullanici]);
 
-  const mH = (r) => ({ id: r.id, isim: r.name, telefon: r.phone, notlar: r.notes || "", olusturuldu: r.created_at });
+  const mH = (r) => ({ id: r.id, isim: r.name, telefon: r.phone, notlar: r.notes || "", olusturuldu: r.created_at, silinmeTarihi: r.deleted_at || null });
   const mT = (r) => ({ id: r.id, hastaId: r.patient_id, islem: r.procedure, tarih: r.date, fiyat: Number(r.price) || 0, notlar: r.notes || "", personel: r.personel || "", upsales: r.upsales || false, upsalesIslem: r.upsales_islem || "", upsalesFiyat: Number(r.upsales_fiyat) || 0 });
   const mR = (r) => ({ id: r.id, tedaviId: r.treatment_id, hastaId: r.patient_id, islem: r.procedure, etiket: r.label, sonTarih: r.due_date, durum: r.status, atanan: r.assigned_to, tamamlananTarih: r.completed_at, tamamlayan: r.completed_by, waGonderildi: r.wa_sent });
   const hatirlaticiTaslagiOlustur = (tedaviId, hastaId, veri, atanan = "Atanmamış") => {
@@ -186,17 +285,41 @@ export default function App() {
     const telefon = telefonuNormalizeEt(veri.telefon, veri.ulkeKodu || VARSAYILAN_ULKE_KODU);
     if (hastalar.some(h => telefonAnahtari(h.telefon) === telefonAnahtari(telefon))) { bildirimGoster("⚠ Bu telefon zaten kayıtlı", "uyari"); return false; }
     const y = { id: uid(), name: veri.isim, phone: telefon, notes: veri.notlar || "", created_at: bugun() };
-    const { error } = await supabase.from("patients").insert(y);
+    const { error } = await supabase.from(TABLES.patients).insert(y);
     if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
     setHastalar(prev => [{ id: y.id, isim: veri.isim, telefon, notlar: veri.notlar || "", olusturuldu: bugun() }, ...prev]);
     bildirimGoster("Hasta eklendi ✓"); return true;
   };
   const hastaSil = async (id) => {
-    await supabase.from("patients").delete().eq("id", id);
+    const silinmeTarihi = new Date().toISOString();
+    const { error } = await supabase.from(TABLES.patients).update({ deleted_at: silinmeTarihi }).eq("id", id);
+    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return; }
+    setHastalar(p => p.map(h => h.id === id ? { ...h, silinmeTarihi } : h));
+    setSeciliHasta(null); setModal(null); bildirimGoster("Hasta çöp kutusuna taşındı", "uyari");
+  };
+  const hastaGeriAl = async (id) => {
+    const { error } = await supabase.from(TABLES.patients).update({ deleted_at: null }).eq("id", id);
+    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return; }
+    setHastalar(p => p.map(h => h.id === id ? { ...h, silinmeTarihi: null } : h));
+    bildirimGoster("Hasta geri alındı ✓");
+  };
+  const hastaKaliciSil = async (id) => {
+    const { error } = await supabase.from(TABLES.patients).delete().eq("id", id);
+    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return; }
     setHastalar(p => p.filter(h => h.id !== id));
     setTedaviler(p => p.filter(t => t.hastaId !== id));
     setHatirlaticilar(p => p.filter(r => r.hastaId !== id));
-    setSeciliHasta(null); setModal(null); bildirimGoster("Hasta silindi", "uyari");
+    bildirimGoster("Hasta kalıcı silindi", "uyari");
+  };
+  const copuBosalt = async () => {
+    const ids = hastalar.filter(h => h.silinmeTarihi).map(h => h.id);
+    if (!ids.length) return;
+    const { error } = await supabase.from(TABLES.patients).delete().in("id", ids);
+    if (error) { bildirimGoster("Hata: " + error.message, "hata"); return; }
+    setHastalar(p => p.filter(h => !ids.includes(h.id)));
+    setTedaviler(p => p.filter(t => !ids.includes(t.hastaId)));
+    setHatirlaticilar(p => p.filter(r => !ids.includes(r.hastaId)));
+    bildirimGoster("Çöp kutusu boşaltıldı", "uyari");
   };
   const hastaGuncelle = async (id, veri) => {
     const telefon = telefonuNormalizeEt(veri.telefon, veri.ulkeKodu || VARSAYILAN_ULKE_KODU);
@@ -205,7 +328,7 @@ export default function App() {
       return false;
     }
     const payload = { name: veri.isim, phone: telefon, notes: veri.notlar || "" };
-    const { error } = await supabase.from("patients").update(payload).eq("id", id);
+    const { error } = await supabase.from(TABLES.patients).update(payload).eq("id", id);
     if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
     const guncelHasta = { id, isim: veri.isim, telefon, notlar: veri.notlar || "", olusturuldu: hastalar.find(h => h.id === id)?.olusturuldu || bugun() };
     setHastalar(p => p.map(h => h.id === id ? { ...h, ...guncelHasta } : h));
@@ -217,16 +340,26 @@ export default function App() {
   /* ── Tedavi ── */
   const tedaviEkle = async (hastaId, veri) => {
     const t = { id: uid(), patient_id: hastaId, procedure: veri.islem, date: veri.tarih, price: Number(veri.fiyat) || 0, notes: veri.notlar || "", created_at: bugun(), personel: kullanici?.isim || "", upsales: veri.upsales || false, upsales_islem: veri.upsalesIslem || "", upsales_fiyat: Number(veri.upsalesFiyat) || 0 };
-    const { error } = await supabase.from("treatments").insert(t);
+    const { error } = await supabase.from(TABLES.treatments).insert(t);
     if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
     setTedaviler(prev => [mT(t), ...prev]);
     const yeniR = hatirlaticiTaslagiOlustur(t.id, hastaId, veri, kullanici?.isim || "Atanmamış");
     if (yeniR.length > 0) {
-      await supabase.from("reminders").insert(yeniR);
+      await supabase.from(TABLES.reminders).insert(yeniR);
       setHatirlaticilar(prev => [...prev, ...yeniR.map(mR)]);
     }
     bildirimGoster(`${veri.islem} eklendi${veri.upsales ? " + Upsales" : ""} ✓`);
     return true;
+  };
+  const hizliIslemTuruEkle = (isim) => {
+    const ad = String(isim || "").trim();
+    if (!ad) return "";
+    const mevcut = islemListesi.find(i => i.isim.toLocaleLowerCase("tr-TR") === ad.toLocaleLowerCase("tr-TR"));
+    if (mevcut) return mevcut.isim;
+    const yeni = { id: uid(), isim: ad, renk: "#8b5cf6", hatirlaticilar: [{ etiket: "2 Hafta Kontrolü", gun: 14 }, { etiket: "3 Ay Takip", gun: 90 }] };
+    islemGuncelle([...islemListesi, yeni]);
+    bildirimGoster(`${ad} işlem listesine eklendi ✓`);
+    return yeni.isim;
   };
   const tedaviGuncelle = async (tedaviId, veri) => {
     const mevcutTedavi = tedaviler.find(t => t.id === tedaviId);
@@ -240,24 +373,24 @@ export default function App() {
       upsales_islem: veri.upsalesIslem || "",
       upsales_fiyat: Number(veri.upsalesFiyat) || 0,
     };
-    const { error } = await supabase.from("treatments").update(payload).eq("id", tedaviId);
+    const { error } = await supabase.from(TABLES.treatments).update(payload).eq("id", tedaviId);
     if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
 
     setTedaviler(prev => prev.map(t => t.id === tedaviId ? { ...t, islem: veri.islem, tarih: veri.tarih, fiyat: Number(veri.fiyat) || 0, notlar: veri.notlar || "", upsales: veri.upsales || false, upsalesIslem: veri.upsalesIslem || "", upsalesFiyat: Number(veri.upsalesFiyat) || 0 } : t));
 
     const mevcutPending = hatirlaticilar.filter(r => r.tedaviId === tedaviId && r.durum === "pending");
     if (mevcutPending.length > 0) {
-      await supabase.from("reminders").delete().eq("treatment_id", tedaviId).eq("status", "pending");
+      await supabase.from(TABLES.reminders).delete().eq("treatment_id", tedaviId).eq("status", "pending");
       setHatirlaticilar(prev => prev.filter(r => !(r.tedaviId === tedaviId && r.durum === "pending")));
     }
 
     const yeniPending = hatirlaticiTaslagiOlustur(tedaviId, mevcutTedavi.hastaId, veri, mevcutPending[0]?.atanan || "Atanmamış");
     if (yeniPending.length > 0) {
-      await supabase.from("reminders").insert(yeniPending);
+      await supabase.from(TABLES.reminders).insert(yeniPending);
       setHatirlaticilar(prev => [...prev, ...yeniPending.map(mR)]);
     }
 
-    await supabase.from("reminders").update({ procedure: veri.islem }).eq("treatment_id", tedaviId).eq("status", "done");
+    await supabase.from(TABLES.reminders).update({ procedure: veri.islem }).eq("treatment_id", tedaviId).eq("status", "done");
     setHatirlaticilar(prev => prev.map(r => r.tedaviId === tedaviId && r.durum === "done" ? { ...r, islem: veri.islem } : r));
     bildirimGoster("Tedavi güncellendi ✓");
     return true;
@@ -265,16 +398,17 @@ export default function App() {
 
   /* ── Hatırlatıcı ── */
   const tamamlaIsaretle = async (id) => {
-    await supabase.from("reminders").update({ status: "done", completed_at: bugun(), completed_by: kullanici?.isim }).eq("id", id);
+    await supabase.from(TABLES.reminders).update({ status: "done", completed_at: bugun(), completed_by: kullanici?.isim }).eq("id", id);
     setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, durum: "done", tamamlananTarih: bugun(), tamamlayan: kullanici?.isim } : r));
     bildirimGoster("Tamamlandı ✓");
   };
-  const bekleyeAl   = async (id) => { await supabase.from("reminders").update({ status: "pending", completed_at: null, completed_by: null }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, durum: "pending", tamamlananTarih: null, tamamlayan: null } : r)); };
-  const personelAta = async (id, per) => { await supabase.from("reminders").update({ assigned_to: per }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, atanan: per } : r)); };
-  const waGonderildi = async (id) => { await supabase.from("reminders").update({ wa_sent: true }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, waGonderildi: true } : r)); };
+  const bekleyeAl   = async (id) => { await supabase.from(TABLES.reminders).update({ status: "pending", completed_at: null, completed_by: null }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, durum: "pending", tamamlananTarih: null, tamamlayan: null } : r)); };
+  const personelAta = async (id, per) => { await supabase.from(TABLES.reminders).update({ assigned_to: per }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, atanan: per } : r)); };
+  const waGonderildi = async (id) => { await supabase.from(TABLES.reminders).update({ wa_sent: true }).eq("id", id); setHatirlaticilar(p => p.map(r => r.id === id ? { ...r, waGonderildi: true } : r)); };
 
   /* ── Excel / CSV ── */
   const disKaynaktanIceriAktar = async (kayitlar) => {
+    if (kayitlar.length > CSV_IMPORT_LIMIT) { bildirimGoster(`En fazla ${CSV_IMPORT_LIMIT} hasta içe aktarılabilir`, "uyari"); return; }
     const varOlanTelefonlar = new Set(hastalar.map(h => telefonAnahtari(h.telefon)));
     let ek = 0, at = 0, hata = 0;
     for (const kayit of kayitlar) {
@@ -289,7 +423,7 @@ export default function App() {
       if (!isim || !telefon || !telefonKey || varOlanTelefonlar.has(telefonKey)) { at++; continue; }
 
       const p = { id: uid(), name: isim, phone: telefon, notes: notlar, created_at: bugun() };
-      const { error: hastaHata } = await supabase.from("patients").insert(p);
+      const { error: hastaHata } = await supabase.from(TABLES.patients).insert(p);
       if (hastaHata) { hata++; continue; }
 
       varOlanTelefonlar.add(telefonKey);
@@ -298,10 +432,10 @@ export default function App() {
       if (islem && tarih) {
         const ib = islemListesi.find(i => i.isim === islem);
         const t = { id: uid(), patient_id: p.id, procedure: islem, date: tarih, price: fiyat, notes: "", created_at: bugun(), personel: kullanici?.isim || "", upsales: false, upsales_islem: "", upsales_fiyat: 0 };
-        const { error: tedaviHata } = await supabase.from("treatments").insert(t);
+        const { error: tedaviHata } = await supabase.from(TABLES.treatments).insert(t);
         if (!tedaviHata && ib) {
           const rems = ib.hatirlaticilar.map(k => ({ id: uid(), treatment_id: t.id, patient_id: p.id, procedure: islem, label: k.etiket, due_date: gunEkle(tarih, k.gun), status: "pending", assigned_to: "Atanmamış", completed_at: null, completed_by: null, wa_sent: false }));
-          await supabase.from("reminders").insert(rems);
+          await supabase.from(TABLES.reminders).insert(rems);
         }
       }
     }
@@ -358,44 +492,53 @@ export default function App() {
   };
 
   /* ── Hesaplananlar ── */
+  const aktifHastalar   = hastalar.filter(h => !h.silinmeTarihi);
+  const copHastalar     = hastalar.filter(h => h.silinmeTarihi);
+  const aktifHastaIdleri = new Set(aktifHastalar.map(h => h.id));
+  const aktifTedaviler  = tedaviler.filter(t => aktifHastaIdleri.has(t.hastaId));
+  const aktifHatirlaticilar = hatirlaticilar.filter(r => aktifHastaIdleri.has(r.hastaId));
   const hastaHaritasi   = Object.fromEntries(hastalar.map(h => [h.id, h]));
   const bugunStr        = bugun();
-  const bugunHat        = hatirlaticilar.filter(r => r.durum === "pending" && r.sonTarih === bugunStr);
-  const gecmisHat       = hatirlaticilar.filter(r => r.durum === "pending" && r.sonTarih < bugunStr);
-  const gelecekHat      = hatirlaticilar.filter(r => r.durum === "pending" && r.sonTarih > bugunStr);
-  const tamamlananHat   = hatirlaticilar.filter(r => r.durum === "done");
-  const toplamGelir     = tedaviler.reduce((s, t) => s + (t.fiyat || 0), 0);
-  const aylikGelir      = tedaviler.filter(t => t.tarih?.slice(0, 7) === bugunStr.slice(0, 7)).reduce((s, t) => s + (t.fiyat || 0), 0);
+  const bugunHat        = aktifHatirlaticilar.filter(r => r.durum === "pending" && r.sonTarih === bugunStr);
+  const gecmisHat       = aktifHatirlaticilar.filter(r => r.durum === "pending" && r.sonTarih < bugunStr);
+  const gelecekHat      = aktifHatirlaticilar.filter(r => r.durum === "pending" && r.sonTarih > bugunStr);
+  const tamamlananHat   = aktifHatirlaticilar.filter(r => r.durum === "done");
+  const toplamGelir     = aktifTedaviler.reduce((s, t) => s + (t.fiyat || 0), 0);
+  const aylikGelir      = aktifTedaviler.filter(t => t.tarih?.slice(0, 7) === bugunStr.slice(0, 7)).reduce((s, t) => s + (t.fiyat || 0), 0);
   const personelIsimleri = [...personelListesi.map(p => p.isim), "Atanmamış"];
 
   const filtreliHatirlaticilar = (() => {
-    let l = hatTab === "bugun" ? bugunHat : hatTab === "gecmis" ? gecmisHat : hatTab === "gelecek" ? gelecekHat : hatirlaticilar;
+    let l = hatTab === "bugun" ? bugunHat : hatTab === "gecmis" ? gecmisHat : hatTab === "gelecek" ? gelecekHat : aktifHatirlaticilar;
     if (filtreIslem    !== "Tümü") l = l.filter(r => r.islem  === filtreIslem);
     if (filtrePersonel !== "Tümü") l = l.filter(r => r.atanan === filtrePersonel);
     return [...l].sort((a, b) => a.sonTarih.localeCompare(b.sonTarih));
   })();
 
-  const filtreliHastalar = hastalar.filter(h => {
+  const filtreliHastalar = aktifHastalar.filter(h => {
     const q = hastaArama.toLowerCase();
     return h.isim.toLowerCase().includes(q) || h.telefon.includes(q) || h.id.toLowerCase().includes(q);
   });
 
+  if (AUTH_ENABLED && !authHazir) return <Yukleniyor />;
+  if (AUTH_ENABLED && !authSession) return <AuthGirisEkrani varsayilanEmail={AUTH_EMAIL} onGiris={authGiris} bildirim={bildirim} />;
+  if (!kullanici && !ayarlarHazir) return <Yukleniyor />;
   if (!kullanici) return <GirisEkrani personelListesi={personelListesi} onGiris={oturumAc} bildirim={bildirim} />;
 
   return (
     <div className="appShell" style={{ display: "flex", height: "100vh", background: "#f8f6f3", fontFamily: "'Outfit','Helvetica Neue',sans-serif", overflow: "hidden" }}>
       <GlobalStiller />
-      <YanMenu gorunum={gorunum} setGorunum={setGorunum} kullanici={kullanici} onCikis={oturumKapat} bugunSayisi={bugunHat.length} gecmisSayisi={gecmisHat.length} menuAcik={menuAcik} setMenuAcik={setMenuAcik} isAdmin={isAdmin} />
+      <YanMenu gorunum={gorunum} setGorunum={setGorunum} kullanici={kullanici} onCikis={oturumKapat} bugunSayisi={bugunHat.length} gecmisSayisi={gecmisHat.length} copSayisi={copHastalar.length} menuAcik={menuAcik} setMenuAcik={setMenuAcik} isAdmin={isAdmin} />
       <div className="appMain" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <UstBar gorunum={gorunum} onHastaEkle={() => setModal("hastaEkle")} onIceriAktar={() => setModal("iceriAktar")} onDisaAktar={() => hastalariDisaAktar(filtreliHastalar)} hastaArama={hastaArama} setHastaArama={setHastaArama} isAdmin={isAdmin} />
         <div className="appContent" style={{ flex: 1, overflowY: "auto", padding: "22px 26px", animation: "yukariCik .3s ease" }}>
           {yukleniyor ? <Yukleniyor /> : (
             <>
-              {gorunum === "panel"          && <Panel hastalar={hastalar} tedaviler={tedaviler} hastaHaritasi={hastaHaritasi} bugunHat={bugunHat} gecmisHat={gecmisHat} gelecekHat={gelecekHat} tamamlananHat={tamamlananHat} toplamGelir={toplamGelir} aylikGelir={aylikGelir} tamamlaIsaretle={tamamlaIsaretle} setGorunum={setGorunum} setHatTab={setHatTab} isAdmin={isAdmin} kullanici={kullanici} iletisimKaydet={iletisimKaydet} />}
-              {gorunum === "hastalar"       && <HastaListesi hastalar={filtreliHastalar} tedaviler={tedaviler} hatirlaticilar={hatirlaticilar} onSec={h => { setSeciliHasta(h); setModal("profil"); }} kullanici={kullanici} iletisimKaydet={iletisimKaydet} />}
-              {gorunum === "hatirlaticilar" && <HatirlaticiPanosu hatirlaticilar={filtreliHatirlaticilar} tumHatirlaticilar={hatirlaticilar} hastaHaritasi={hastaHaritasi} hatTab={hatTab} setHatTab={setHatTab} filtreIslem={filtreIslem} setFiltreIslem={setFiltreIslem} filtrePersonel={filtrePersonel} setFiltrePersonel={setFiltrePersonel} tamamlaIsaretle={tamamlaIsaretle} bekleyeAl={bekleyeAl} personelAta={personelAta} waGonderildi={waGonderildi} bugunHat={bugunHat} gecmisHat={gecmisHat} gelecekHat={gelecekHat} personelIsimleri={personelIsimleri} islemListesi={islemListesi} kullanici={kullanici} iletisimKaydet={iletisimKaydet} />}
-              {gorunum === "analitik" && (isAdmin ? <Analitik hastalar={hastalar} tedaviler={tedaviler} hatirlaticilar={hatirlaticilar} tamamlananHat={tamamlananHat} toplamGelir={toplamGelir} aylikGelir={aylikGelir} islemListesi={islemListesi} personelListesi={personelListesi} iletisimLog={iletisimLog} kullanici={kullanici} /> : <Analitik hastalar={hastalar} tedaviler={tedaviler} hatirlaticilar={hatirlaticilar} tamamlananHat={tamamlananHat} toplamGelir={toplamGelir} aylikGelir={aylikGelir} islemListesi={islemListesi} personelListesi={personelListesi} iletisimLog={iletisimLog} kullanici={kullanici} />)}
-              {gorunum === "ozet"           && <OzetPaneli hastalar={hastalar} hatirlaticilar={hatirlaticilar} hastaHaritasi={hastaHaritasi} bugunHat={bugunHat} gecmisHat={gecmisHat} bildirimGoster={bildirimGoster} />}
+              {gorunum === "panel"          && <Panel hastalar={aktifHastalar} tedaviler={aktifTedaviler} hastaHaritasi={hastaHaritasi} bugunHat={bugunHat} gecmisHat={gecmisHat} gelecekHat={gelecekHat} tamamlananHat={tamamlananHat} toplamGelir={toplamGelir} aylikGelir={aylikGelir} tamamlaIsaretle={tamamlaIsaretle} setGorunum={setGorunum} setHatTab={setHatTab} isAdmin={isAdmin} kullanici={kullanici} iletisimKaydet={iletisimKaydet} />}
+              {gorunum === "hastalar"       && <HastaListesi hastalar={filtreliHastalar} tedaviler={aktifTedaviler} hatirlaticilar={aktifHatirlaticilar} onSec={h => { setProfilTedaviAc(false); setSeciliHasta(h); setModal("profil"); }} onTedaviKaydir={h => { setProfilTedaviAc(true); setSeciliHasta(h); setModal("profil"); }} onSil={hastaSil} kullanici={kullanici} iletisimKaydet={iletisimKaydet} />}
+              {gorunum === "hatirlaticilar" && <HatirlaticiPanosu hatirlaticilar={filtreliHatirlaticilar} tumHatirlaticilar={aktifHatirlaticilar} hastaHaritasi={hastaHaritasi} hatTab={hatTab} setHatTab={setHatTab} filtreIslem={filtreIslem} setFiltreIslem={setFiltreIslem} filtrePersonel={filtrePersonel} setFiltrePersonel={setFiltrePersonel} tamamlaIsaretle={tamamlaIsaretle} bekleyeAl={bekleyeAl} personelAta={personelAta} waGonderildi={waGonderildi} bugunHat={bugunHat} gecmisHat={gecmisHat} gelecekHat={gelecekHat} personelIsimleri={personelIsimleri} islemListesi={islemListesi} kullanici={kullanici} iletisimKaydet={iletisimKaydet} />}
+              {gorunum === "analitik" && (isAdmin ? <Analitik hastalar={aktifHastalar} tedaviler={aktifTedaviler} hatirlaticilar={aktifHatirlaticilar} tamamlananHat={tamamlananHat} toplamGelir={toplamGelir} aylikGelir={aylikGelir} islemListesi={islemListesi} personelListesi={personelListesi} iletisimLog={iletisimLog} kullanici={kullanici} /> : <Analitik hastalar={aktifHastalar} tedaviler={aktifTedaviler} hatirlaticilar={aktifHatirlaticilar} tamamlananHat={tamamlananHat} toplamGelir={toplamGelir} aylikGelir={aylikGelir} islemListesi={islemListesi} personelListesi={personelListesi} iletisimLog={iletisimLog} kullanici={kullanici} />)}
+              {gorunum === "ozet"           && <OzetPaneli hastalar={aktifHastalar} hatirlaticilar={aktifHatirlaticilar} hastaHaritasi={hastaHaritasi} bugunHat={bugunHat} gecmisHat={gecmisHat} bildirimGoster={bildirimGoster} />}
+              {gorunum === "cop"            && <CopKutusu hastalar={copHastalar} onGeriAl={hastaGeriAl} onKaliciSil={hastaKaliciSil} onBosalt={copuBosalt} />}
               {gorunum === "ayarlar" && (isAdmin ? <Ayarlar personelListesi={personelListesi} onPersonelGuncelle={personelGuncelle} islemListesi={islemListesi} onIslemGuncelle={islemGuncelle} bildirimGoster={bildirimGoster} /> : <YetkiYok />)}
             </>
           )}
@@ -405,7 +548,7 @@ export default function App() {
       {modal === "hastaEkle"  && <HastaEkleModal onKapat={() => setModal(null)} onKaydet={hastaEkle} />}
       {modal === "iceriAktar" && <IceriAktarModal onKapat={() => setModal(null)} onAktar={disKaynaktanIceriAktar} />}
       {modal === "profil" && seciliHasta && (
-        <ProfilModal hasta={seciliHasta} tedaviler={tedaviler.filter(t => t.hastaId === seciliHasta.id)} hatirlaticilar={hatirlaticilar.filter(r => r.hastaId === seciliHasta.id)} onKapat={() => { setModal(null); setSeciliHasta(null); }} onTedaviEkle={v => tedaviEkle(seciliHasta.id, v)} onTedaviGuncelle={tedaviGuncelle} onSil={() => hastaSil(seciliHasta.id)} onHastaGuncelle={v => hastaGuncelle(seciliHasta.id, v)} tamamlaIsaretle={tamamlaIsaretle} bekleyeAl={bekleyeAl} kullanici={kullanici} isAdmin={isAdmin} bildirimGoster={bildirimGoster} islemListesi={islemListesi} iletisimKaydet={iletisimKaydet} />
+        <ProfilModal hasta={seciliHasta} tedaviler={tedaviler.filter(t => t.hastaId === seciliHasta.id)} hatirlaticilar={hatirlaticilar.filter(r => r.hastaId === seciliHasta.id)} onKapat={() => { setModal(null); setSeciliHasta(null); setProfilTedaviAc(false); }} onTedaviEkle={v => tedaviEkle(seciliHasta.id, v)} onTedaviGuncelle={tedaviGuncelle} onSil={() => hastaSil(seciliHasta.id)} onHastaGuncelle={v => hastaGuncelle(seciliHasta.id, v)} tamamlaIsaretle={tamamlaIsaretle} bekleyeAl={bekleyeAl} kullanici={kullanici} isAdmin={isAdmin} bildirimGoster={bildirimGoster} islemListesi={islemListesi} iletisimKaydet={iletisimKaydet} ilkTedaviAc={profilTedaviAc} onYeniIslemTuru={hizliIslemTuruEkle} />
       )}
     </div>
   );
@@ -470,6 +613,49 @@ function GlobalStiller() {
 /* ══════════════════════════════════════════════════
    GİRİŞ EKRANI
 ══════════════════════════════════════════════════ */
+function AuthGirisEkrani({ varsayilanEmail, onGiris, bildirim }) {
+  const [email, setEmail] = useState(varsayilanEmail);
+  const [sifre, setSifre] = useState("");
+  const [hata, setHata] = useState("");
+  const [bekliyor, setBekliyor] = useState(false);
+
+  const girisYap = async (e) => {
+    e.preventDefault();
+    if (!email.trim() || !sifre) {
+      setHata("E-posta ve şifre gerekli");
+      return;
+    }
+    setBekliyor(true);
+    setHata("");
+    const basarili = await onGiris(email, sifre);
+    setBekliyor(false);
+    if (!basarili) {
+      setHata("Giriş bilgileri hatalı");
+      setSifre("");
+    }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#1a1a2e 0%,#16213e 100%)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18, fontFamily: "'Outfit',sans-serif" }}>
+      <GlobalStiller />
+      <form onSubmit={girisYap} style={{ width: "min(440px, 100%)", background: "#fff", borderRadius: 22, padding: 36, boxShadow: "0 40px 100px rgba(0,0,0,.4)" }}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ width: 62, height: 62, background: "linear-gradient(135deg,#1a1a2e,#e11d48)", borderRadius: 18, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, margin: "0 auto 14px" }}>💎</div>
+          <div style={{ fontSize: 21, fontWeight: 800, color: "#1a1a2e", letterSpacing: -.5 }}>{KLINIK_ADI}</div>
+          <div style={{ fontSize: 13, color: "#9b8f88", marginTop: 5 }}>Güvenli Giriş</div>
+        </div>
+        <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#78706a", marginBottom: 7 }}>E-posta</label>
+        <input className="giris" type="email" autoComplete="email" value={email} onChange={e => { setEmail(e.target.value); setHata(""); }} style={{ marginBottom: 14 }} />
+        <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#78706a", marginBottom: 7 }}>Şifre</label>
+        <input className="giris" type="password" autoComplete="current-password" value={sifre} onChange={e => { setSifre(e.target.value); setHata(""); }} autoFocus style={{ marginBottom: 12 }} />
+        {hata && <div style={{ color: "#e11d48", fontSize: 13, marginBottom: 12, textAlign: "center" }}>{hata}</div>}
+        <Btn type="submit" koyu disabled={bekliyor} style={{ width: "100%", padding: 14, fontSize: 15, fontWeight: 700 }}>{bekliyor ? "Kontrol ediliyor..." : "Devam Et"}</Btn>
+      </form>
+      {bildirim && <Bildirim {...bildirim} />}
+    </div>
+  );
+}
+
 function GirisEkrani({ personelListesi, onGiris, bildirim }) {
   const [adim, setAdim] = useState("sec");
   const [secilen, setSecilen] = useState(null);
@@ -534,13 +720,14 @@ function GirisEkrani({ personelListesi, onGiris, bildirim }) {
 /* ══════════════════════════════════════════════════
    YAN MENÜ
 ══════════════════════════════════════════════════ */
-function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisSayisi, menuAcik, setMenuAcik, isAdmin }) {
+function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisSayisi, copSayisi, menuAcik, setMenuAcik, isAdmin }) {
   const menuler = [
     { k: "panel",          i: "⬡", e: "Panel" },
     { k: "hastalar",       i: "◎", e: "Hastalar" },
     { k: "hatirlaticilar", i: "◷", e: "Hatırlatıcılar" },
     { k: "analitik",       i: "▦", e: isAdmin ? "Analitik & Raporlar" : "Raporlarım" },
     { k: "ozet",           i: "✉", e: "AI Özet" },
+    { k: "cop",            i: "⌫", e: "Çöp Kovası" },
     ...(isAdmin ? [{ k: "ayarlar", i: "⚙", e: "Ayarlar" }] : []),
   ];
   const rozet = gecmisSayisi > 0 ? gecmisSayisi : bugunSayisi;
@@ -572,6 +759,9 @@ function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisS
             {m.k === "hatirlaticilar" && rozet > 0 && (
               <span style={{ background: rRenk, color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 700, position: menuAcik ? "relative" : "absolute", top: menuAcik ? 0 : 4, right: menuAcik ? 0 : 4 }} className="mono">{rozet}</span>
             )}
+            {m.k === "cop" && copSayisi > 0 && (
+              <span style={{ background: "#78706a", color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 700, position: menuAcik ? "relative" : "absolute", top: menuAcik ? 0 : 4, right: menuAcik ? 0 : 4 }} className="mono">{copSayisi}</span>
+            )}
           </div>
         ))}
 
@@ -600,7 +790,7 @@ function YanMenu({ gorunum, setGorunum, kullanici, onCikis, bugunSayisi, gecmisS
    ÜST BAR
 ══════════════════════════════════════════════════ */
 function UstBar({ gorunum, onHastaEkle, onIceriAktar, onDisaAktar, hastaArama, setHastaArama, isAdmin }) {
-  const b = { panel: "Panel", hastalar: "Hasta Kayıtları", hatirlaticilar: "Hatırlatıcı Görevler", analitik: isAdmin ? "Analitik & Raporlar" : "Raporlarım", ozet: "AI Günlük Özet", ayarlar: "Sistem Ayarları" };
+  const b = { panel: "Panel", hastalar: "Hasta Kayıtları", hatirlaticilar: "Hatırlatıcı Görevler", analitik: isAdmin ? "Analitik & Raporlar" : "Raporlarım", ozet: "AI Günlük Özet", cop: "Çöp Kovası", ayarlar: "Sistem Ayarları" };
   return (
     <div className="topBar" style={{ background: "#fff", borderBottom: "1px solid #ece7e0", padding: "0 26px", height: 56, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
       <div className="topBarTitle" style={{ fontSize: 17, fontWeight: 700, color: "#1a1a2e", flex: 1 }}>{b[gorunum] || ""}</div>
@@ -683,9 +873,12 @@ function Panel({ hastalar, tedaviler, hastaHaritasi, bugunHat, gecmisHat, gelece
 /* ══════════════════════════════════════════════════
    HASTA LİSTESİ
 ══════════════════════════════════════════════════ */
-function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, kullanici, iletisimKaydet }) {
+function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, onTedaviKaydir, onSil, kullanici, iletisimKaydet }) {
   return (
     <div className="kart tableCard" style={{ overflow: "hidden" }}>
+      <div style={{ padding: "10px 14px", background: "#fffaf0", borderBottom: "1px solid #fde68a", color: "#8a5a00", fontSize: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <strong>Kaydır:</strong><span>Sağa: tedavi ekle</span><span>Sola: çöp kovasına taşı</span>
+      </div>
       <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ background: "#f8f6f3", borderBottom: "1px solid #ece7e0" }}>
@@ -703,14 +896,16 @@ function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, kullanici, i
             return (
               <tr key={h.id} className="satir" style={{ borderBottom: "1px solid #f1ede8" }} onClick={() => onSec(h)}>
                 <td style={{ padding: "11px 14px" }}><span className="mono" style={{ fontSize: 11, color: "#9b8f88" }}>{h.id}</span></td>
-                <td style={{ padding: "11px 14px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                    <Avatar isim={h.isim} boyut={34} />
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 14, color: "#1a1a2e" }}>{h.isim}</div>
-                      {h.notlar && <div style={{ fontSize: 11, color: "#9b8f88" }}>{h.notlar.slice(0, 35)}{h.notlar.length > 35 ? "…" : ""}</div>}
+                <td style={{ padding: "11px 14px" }} onClick={e => e.stopPropagation()}>
+                  <KaydirmaAlani onSaga={() => onTedaviKaydir(h)} onSola={() => onSil(h.id)} onTikla={() => onSec(h)}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9, cursor: "grab", touchAction: "pan-y" }}>
+                      <Avatar isim={h.isim} boyut={34} />
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 14, color: "#1a1a2e" }}>{h.isim}</div>
+                        {h.notlar && <div style={{ fontSize: 11, color: "#9b8f88" }}>{h.notlar.slice(0, 35)}{h.notlar.length > 35 ? "…" : ""}</div>}
+                      </div>
                     </div>
-                  </div>
+                  </KaydirmaAlani>
                 </td>
                 <td style={{ padding: "11px 14px", fontSize: 13 }}>{h.telefon}</td>
                 <td style={{ padding: "11px 14px" }}><span className="mono" style={{ fontWeight: 700 }}>{hT.length}</span></td>
@@ -723,6 +918,69 @@ function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, kullanici, i
                     <a href={`https://wa.me/${h.telefon.replace(/[^0-9]/g, "")}`} target="_blank" rel="noreferrer" onClick={() => iletisimKaydet(h.id, h.isim, "WhatsApp", kullanici?.isim, "—")}><Btn kk style={{ background: "#f0fdf4", color: "#059669", border: "1px solid #a7f3d0" }}>💬</Btn></a>
                   </div>
                 </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function KaydirmaAlani({ children, onSaga, onSola, onTikla }) {
+  const [baslangic, setBaslangic] = useState(null);
+  const [kayma, setKayma] = useState(0);
+  const esik = 86;
+  const bitir = () => {
+    const son = kayma;
+    if (son > esik) onSaga();
+    else if (son < -esik) onSola();
+    else if (Math.abs(son) < 8) onTikla?.();
+    setBaslangic(null);
+    setKayma(0);
+  };
+  return (
+    <div
+      onPointerDown={e => setBaslangic(e.clientX)}
+      onPointerMove={e => { if (baslangic !== null) setKayma(Math.max(-125, Math.min(125, e.clientX - baslangic))); }}
+      onPointerUp={bitir}
+      onPointerCancel={bitir}
+      style={{ position: "relative", overflow: "hidden", borderRadius: 10 }}
+    >
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 12px", background: kayma >= 0 ? "#eff6ff" : "#fff1f2", color: kayma >= 0 ? "#1d4ed8" : "#e11d48", fontSize: 12, fontWeight: 700, pointerEvents: "none" }}>
+        <span>+ Tedavi</span>
+        <span>Çöp</span>
+      </div>
+      <div style={{ position: "relative", transform: `translateX(${kayma}px)`, transition: baslangic === null ? "transform .18s ease" : "none", background: "#fff", borderRadius: 10, padding: "3px 0" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function CopKutusu({ hastalar, onGeriAl, onKaliciSil, onBosalt }) {
+  return (
+    <div className="kart tableCard" style={{ overflow: "hidden" }}>
+      <div style={{ padding: 16, borderBottom: "1px solid #ece7e0", background: "#f8f6f3", display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#1a1a2e" }}>Çöp kovası</div>
+          <div style={{ fontSize: 13, color: "#78706a", marginTop: 4 }}>Silinen hastalar 45 gün burada tutulur. İstersen manuel olarak çöpü boşaltabilirsin.</div>
+        </div>
+        <Btn onClick={onBosalt} style={{ background: "#fff1f2", color: "#e11d48", border: "1px solid #fecdd3" }}>Çöpü Boşalt</Btn>
+      </div>
+      <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead><tr style={{ background: "#fff", borderBottom: "1px solid #ece7e0" }}>{["Hasta", "Telefon", "Silinme", "Kalan", "İşlem"].map(b => <th key={b} style={{ padding: "11px 14px", textAlign: "left", fontSize: 11, letterSpacing: 1.2, textTransform: "uppercase", color: "#9b8f88", fontWeight: 500 }}>{b}</th>)}</tr></thead>
+        <tbody>
+          {hastalar.length === 0 && <tr><td colSpan={5} style={{ padding: 48, textAlign: "center", color: "#b0a89e" }}>Çöp kovası boş</td></tr>}
+          {hastalar.map(h => {
+            const kalan = Math.max(0, COP_KUTUSU_GUN + gunFarki(String(h.silinmeTarihi || "").slice(0, 10)));
+            return (
+              <tr key={h.id} style={{ borderBottom: "1px solid #f1ede8" }}>
+                <td style={{ padding: "11px 14px" }}><div style={{ display: "flex", alignItems: "center", gap: 9 }}><Avatar isim={h.isim} boyut={34} /><div><div style={{ fontWeight: 600 }}>{h.isim}</div><div className="mono" style={{ fontSize: 11, color: "#9b8f88" }}>{h.id}</div></div></div></td>
+                <td style={{ padding: "11px 14px", fontSize: 13 }}>{h.telefon}</td>
+                <td style={{ padding: "11px 14px", fontSize: 13 }}>{tarihFmt(String(h.silinmeTarihi || "").slice(0, 10))}</td>
+                <td style={{ padding: "11px 14px" }}><span className="etiket" style={{ background: kalan ? "#fff7ed" : "#fff1f2", color: kalan ? "#d97706" : "#e11d48", border: `1px solid ${kalan ? "#fed7aa" : "#fecdd3"}` }}>{kalan ? `${kalan} gün` : "Süre doldu"}</span></td>
+                <td style={{ padding: "11px 14px" }}><div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}><Btn kk koyu onClick={() => onGeriAl(h.id)}>Geri Al</Btn><Btn kk onClick={() => onKaliciSil(h.id)} style={{ background: "#fff1f2", color: "#e11d48", border: "1px solid #fecdd3" }}>Kalıcı Sil</Btn></div></td>
               </tr>
             );
           })}
@@ -1110,21 +1368,23 @@ function PersonelSatiri({ p, onSil, onPinGuncelle }) {
 /* ══════════════════════════════════════════════════
    PROFİL MODALİ
 ══════════════════════════════════════════════════ */
-function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, onTedaviGuncelle, onSil, onHastaGuncelle, tamamlaIsaretle, bekleyeAl, kullanici, isAdmin, islemListesi, iletisimKaydet }) {
+function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, onTedaviGuncelle, onSil, onHastaGuncelle, tamamlaIsaretle, bekleyeAl, kullanici, isAdmin, islemListesi, iletisimKaydet, ilkTedaviAc, onYeniIslemTuru }) {
   const bosTxForm = () => ({ islem: islemListesi[0]?.isim || "Botox", tarih: bugun(), fiyat: "", notlar: "", upsales: false, upsalesIslem: "", upsalesFiyat: "", ozelHatirlaticilar: null });
   const [hastaForm, setHastaForm] = useState(() => ({ isim: hasta.isim, ...telefonuParcala(hasta.telefon) }));
   const [notlar, setNotlar] = useState(hasta.notlar || "");
-  const [tedaviEk, setTedaviEk] = useState(false);
+  const [tedaviEk, setTedaviEk] = useState(Boolean(ilkTedaviAc));
   const [bilgiKaydedildi, setBilgiKaydedildi] = useState(false);
   const [notKaydedildi, setNotKaydedildi] = useState(false);
   const [duzenlenenTedaviId, setDuzenlenenTedaviId] = useState(null);
   const [txForm, setTxForm] = useState(bosTxForm);
   const [hatTmpl, setHatTmpl] = useState([]);
+  const [yeniIslemAdi, setYeniIslemAdi] = useState("");
 
   useEffect(() => {
     setHastaForm({ isim: hasta.isim, ...telefonuParcala(hasta.telefon) });
     setNotlar(hasta.notlar || "");
-  }, [hasta.id, hasta.isim, hasta.telefon, hasta.notlar]);
+    setTedaviEk(Boolean(ilkTedaviAc));
+  }, [hasta.id, hasta.isim, hasta.telefon, hasta.notlar, ilkTedaviAc]);
 
   useEffect(() => {
     if (txForm.ozelHatirlaticilar?.length) {
@@ -1192,6 +1452,13 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
       : await onTedaviEkle(payload);
     if (kaydedildi) tedaviFormunuSifirla();
   };
+  const yeniIslemEkle = () => {
+    const ad = yeniIslemAdi.trim();
+    if (!ad) return;
+    const eklenen = onYeniIslemTuru?.(ad) || ad;
+    setTxForm(f => ({ ...f, islem: eklenen, ozelHatirlaticilar: null }));
+    setYeniIslemAdi("");
+  };
 
   const bekleyenHat = hatirlaticilar.filter(r => r.durum === "pending").sort((a, b) => a.sonTarih.localeCompare(b.sonTarih));
   const tamamlHat = hatirlaticilar.filter(r => r.durum === "done");
@@ -1256,6 +1523,10 @@ function ProfilModal({ hasta, tedaviler, hatirlaticilar, onKapat, onTedaviEkle, 
                   <select className="giris" value={txForm.islem} onChange={e => setTxForm(f => ({ ...f, islem: e.target.value, ozelHatirlaticilar: null }))}>
                     {islemListesi.map(i => <option key={i.id}>{i.isim}</option>)}
                   </select>
+                  <div className="mobileWrap" style={{ display: "flex", gap: 8 }}>
+                    <input className="giris" placeholder="Listede yoksa yeni tedavi adı" value={yeniIslemAdi} onChange={e => setYeniIslemAdi(e.target.value)} />
+                    <Btn onClick={yeniIslemEkle} style={{ background: "#eef5ff", color: "#1d4ed8", border: "1px solid #bfdbfe", whiteSpace: "nowrap" }}>Listeye Ekle</Btn>
+                  </div>
 
                   <div style={{ background: "#fff", borderRadius: 10, padding: "12px 14px", border: "1px solid #e4ddd5" }}>
                     <div style={{ fontSize: 12, color: "#9b8f88", fontWeight: 600, marginBottom: 10 }}>🔔 Hatırlatıcı Günleri</div>
@@ -1496,13 +1767,14 @@ function IceriAktarModal({ onKapat, onAktar }) {
         .filter(kayit => Object.values(kayit).some(Boolean));
 
       if (!cozulmus.length) throw new Error("Dosyada okunabilir satır bulunamadı.");
+      if (cozulmus.length > CSV_IMPORT_LIMIT) throw new Error(`En fazla ${CSV_IMPORT_LIMIT} hasta içe aktarılabilir.`);
 
       setDosyaAdi(dosya.name);
       setKayitlar(cozulmus);
-    } catch {
+    } catch (err) {
       setDosyaAdi("");
       setKayitlar([]);
-      setHata("Dosya okunamadı. İlk satırda kolon başlıkları olduğundan emin olun.");
+      setHata(err?.message || "Dosya okunamadı. İlk satırda kolon başlıkları olduğundan emin olun.");
     } finally {
       setHazirlaniyor(false);
     }
@@ -1521,7 +1793,7 @@ function IceriAktarModal({ onKapat, onAktar }) {
       <p style={{ fontSize: 13, color: "#78706a", marginBottom: 12, lineHeight: 1.6 }}>
         Excel, CSV veya Numbers'tan dışa aktarılan dosyayı yükleyin. Zorunlu sütunlar:
         {" "}<code style={{ background: "#f1ede8", padding: "1px 5px", borderRadius: 4 }}>isim</code>
-        {" "}<code style={{ background: "#f1ede8", padding: "1px 5px", borderRadius: 4 }}>telefon</code>.
+        {" "}<code style={{ background: "#f1ede8", padding: "1px 5px", borderRadius: 4 }}>telefon</code>. Tek dosyada en fazla {CSV_IMPORT_LIMIT} hasta içe aktarılır.
       </p>
 
       <div style={{ background: "#f8f6f3", borderRadius: 10, padding: 12, marginBottom: 12, border: "1px dashed #d6cfc6" }}>
