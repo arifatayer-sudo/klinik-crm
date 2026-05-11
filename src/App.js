@@ -64,6 +64,7 @@ const telefonuNormalizeEt = (telefon, varsayilanKod = VARSAYILAN_ULKE_KODU) => {
   return eslesme ? telefonuBirlestir(eslesme[1], eslesme[2]) : telefonuBirlestir(varsayilanKod, temiz.replace(/^\+/, ""));
 };
 const telefonAnahtari = (telefon) => telefonuNormalizeEt(telefon).replace(/[^\d+]/g, "");
+const adaGoreSirala = (liste) => [...liste].sort((a, b) => (a.isim || "").localeCompare(b.isim || "", "tr-TR", { sensitivity: "base" }));
 const alanDegeriBul = (satir, adaylar) => {
   const kayitlar = Object.entries(satir || {});
   for (const aday of adaylar) {
@@ -492,7 +493,7 @@ export default function App() {
   };
 
   /* ── Hesaplananlar ── */
-  const aktifHastalar   = hastalar.filter(h => !h.silinmeTarihi);
+  const aktifHastalar   = adaGoreSirala(hastalar.filter(h => !h.silinmeTarihi));
   const copHastalar     = hastalar.filter(h => h.silinmeTarihi);
   const aktifHastaIdleri = new Set(aktifHastalar.map(h => h.id));
   const aktifTedaviler  = tedaviler.filter(t => aktifHastaIdleri.has(t.hastaId));
@@ -514,10 +515,10 @@ export default function App() {
     return [...l].sort((a, b) => a.sonTarih.localeCompare(b.sonTarih));
   })();
 
-  const filtreliHastalar = aktifHastalar.filter(h => {
+  const filtreliHastalar = adaGoreSirala(aktifHastalar.filter(h => {
     const q = hastaArama.toLowerCase();
     return h.isim.toLowerCase().includes(q) || h.telefon.includes(q) || h.id.toLowerCase().includes(q);
-  });
+  }));
 
   if (AUTH_ENABLED && !authHazir) return <Yukleniyor />;
   if (AUTH_ENABLED && !authSession) return <AuthGirisEkrani varsayilanEmail={AUTH_EMAIL} onGiris={authGiris} bildirim={bildirim} />;
