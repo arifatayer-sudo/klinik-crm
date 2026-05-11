@@ -58,10 +58,19 @@ const telefonuParcala = (telefon = "") => {
     : { ulkeKodu: VARSAYILAN_ULKE_KODU, numara: temiz.replace(/^\+/, "") };
 };
 const telefonuNormalizeEt = (telefon, varsayilanKod = VARSAYILAN_ULKE_KODU) => {
-  const temiz = String(telefon ?? "").trim().replace(/\s+/g, " ").replace(/^00/, "+");
-  if (!temiz) return "";
-  const eslesme = temiz.match(/^(\+\d{1,4})(?:\s*)(.*)$/);
-  return eslesme ? telefonuBirlestir(eslesme[1], eslesme[2]) : telefonuBirlestir(varsayilanKod, temiz.replace(/^\+/, ""));
+  const temiz = String(telefon ?? "").trim().replace(/\s+/g, " ");
+  let rakamlar = temiz.replace(/\D/g, "");
+  if (!rakamlar) return "";
+  if (rakamlar.startsWith("00")) rakamlar = rakamlar.slice(2);
+  while (rakamlar.startsWith("9090") && rakamlar.length >= 14) rakamlar = rakamlar.slice(2);
+  let ulusal = "";
+  if (rakamlar.startsWith("90") && rakamlar.length === 12) ulusal = rakamlar.slice(2);
+  else if (rakamlar.startsWith("90") && rakamlar.length > 12) ulusal = rakamlar.slice(-10);
+  else if (rakamlar.startsWith("0") && rakamlar.length === 11) ulusal = rakamlar.slice(1);
+  else if (rakamlar.length === 10) ulusal = rakamlar;
+  if (ulusal.length === 10) return `+90 ${ulusal.slice(0, 3)} ${ulusal.slice(3, 6)} ${ulusal.slice(6)}`;
+  if (temiz.startsWith("+")) return `+${rakamlar}`;
+  return telefonuBirlestir(varsayilanKod, temiz.replace(/^\+/, ""));
 };
 const telefonAnahtari = (telefon) => telefonuNormalizeEt(telefon).replace(/[^\d+]/g, "");
 const adaGoreSirala = (liste) => [...liste].sort((a, b) => (a.isim || "").localeCompare(b.isim || "", "tr-TR", { sensitivity: "base" }));
