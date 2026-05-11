@@ -875,10 +875,36 @@ function Panel({ hastalar, tedaviler, hastaHaritasi, bugunHat, gecmisHat, gelece
    HASTA LİSTESİ
 ══════════════════════════════════════════════════ */
 function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, onTedaviKaydir, onSil, kullanici, iletisimKaydet }) {
+  const SAYFA_BOYUTU = 100;
+  const [sayfa, setSayfa] = useState(1);
+  const toplamSayfa = Math.max(1, Math.ceil(hastalar.length / SAYFA_BOYUTU));
+  const baslangic = (sayfa - 1) * SAYFA_BOYUTU;
+  const sayfaHastalari = hastalar.slice(baslangic, baslangic + SAYFA_BOYUTU);
+  const bitis = Math.min(baslangic + SAYFA_BOYUTU, hastalar.length);
+
+  useEffect(() => { setSayfa(1); }, [hastalar.length]);
+  useEffect(() => {
+    if (sayfa > toplamSayfa) setSayfa(toplamSayfa);
+  }, [sayfa, toplamSayfa]);
+
+  const SayfaKontrolleri = () => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span className="mono" style={{ fontSize: 12, color: "#78706a", background: "#fff", border: "1px solid #ece7e0", borderRadius: 8, padding: "5px 9px" }}>
+        {hastalar.length ? `${baslangic + 1}-${bitis}` : "0"} / {hastalar.length}
+      </span>
+      <Btn kk disabled={sayfa <= 1} onClick={() => setSayfa(s => Math.max(1, s - 1))} style={{ opacity: sayfa <= 1 ? .45 : 1 }}>‹</Btn>
+      <span className="mono" style={{ fontSize: 12, color: "#78706a" }}>{sayfa}/{toplamSayfa}</span>
+      <Btn kk disabled={sayfa >= toplamSayfa} onClick={() => setSayfa(s => Math.min(toplamSayfa, s + 1))} style={{ opacity: sayfa >= toplamSayfa ? .45 : 1 }}>›</Btn>
+    </div>
+  );
+
   return (
     <div className="kart tableCard" style={{ overflow: "hidden" }}>
-      <div style={{ padding: "10px 14px", background: "#fffaf0", borderBottom: "1px solid #fde68a", color: "#8a5a00", fontSize: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <strong>Kaydır:</strong><span>Sağa: tedavi ekle</span><span>Sola: çöp kovasına taşı</span>
+      <div style={{ padding: "10px 14px", background: "#fffaf0", borderBottom: "1px solid #fde68a", color: "#8a5a00", fontSize: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <strong>Kaydır:</strong><span>Sağa: tedavi ekle</span><span>Sola: çöp kovasına taşı</span>
+        </div>
+        <SayfaKontrolleri />
       </div>
       <table className="responsiveTable" style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
@@ -890,7 +916,7 @@ function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, onTedaviKayd
         </thead>
         <tbody>
           {hastalar.length === 0 && <tr><td colSpan={7} style={{ padding: 48, textAlign: "center", color: "#b0a89e" }}>Hasta bulunamadı</td></tr>}
-          {hastalar.map(h => {
+          {sayfaHastalari.map(h => {
             const hT = tedaviler.filter(t => t.hastaId === h.id);
             const hR = hatirlaticilar.filter(r => r.hastaId === h.id && r.durum === "pending");
             const son = [...hT].sort((a, b) => b.tarih?.localeCompare(a.tarih))[0];
@@ -924,6 +950,11 @@ function HastaListesi({ hastalar, tedaviler, hatirlaticilar, onSec, onTedaviKayd
           })}
         </tbody>
       </table>
+      {toplamSayfa > 1 && (
+        <div style={{ padding: "10px 14px", borderTop: "1px solid #ece7e0", background: "#fff", display: "flex", justifyContent: "flex-end" }}>
+          <SayfaKontrolleri />
+        </div>
+      )}
     </div>
   );
 }
