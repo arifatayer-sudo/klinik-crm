@@ -65,6 +65,23 @@ const telefonuNormalizeEt = (telefon, varsayilanKod = VARSAYILAN_ULKE_KODU) => {
 };
 const telefonAnahtari = (telefon) => telefonuNormalizeEt(telefon).replace(/[^\d+]/g, "");
 const adaGoreSirala = (liste) => [...liste].sort((a, b) => (a.isim || "").localeCompare(b.isim || "", "tr-TR", { sensitivity: "base" }));
+const bozukKarakterVar = (metin) => /[ÃÄÅÌÐÞðþýÝ�\u0080-\u009F]/.test(String(metin || ""));
+const metniTemizle = (deger) => {
+  let metin = String(deger ?? "").normalize("NFC");
+  if (bozukKarakterVar(metin) && typeof TextDecoder !== "undefined") {
+    try {
+      const baytlar = Uint8Array.from([...metin].map(karakter => karakter.charCodeAt(0) & 255));
+      const cozulmus = new TextDecoder("utf-8", { fatal: true }).decode(baytlar);
+      if (cozulmus && !cozulmus.includes("�")) metin = cozulmus;
+    } catch {}
+  }
+  return metin
+    .normalize("NFC")
+    .replace(/i\u0307/g, "i")
+    .replace(/ı\u0307/g, "ı")
+    .replace(/\s+/g, " ")
+    .trim();
+};
 const alanDegeriBul = (satir, adaylar) => {
   const kayitlar = Object.entries(satir || {});
   for (const aday of adaylar) {
@@ -283,12 +300,13 @@ export default function App() {
 
   /* ── Hasta ── */
   const hastaEkle = async (veri) => {
+    const isim = metniTemizle(veri.isim);
     const telefon = telefonuNormalizeEt(veri.telefon, veri.ulkeKodu || VARSAYILAN_ULKE_KODU);
     if (hastalar.some(h => telefonAnahtari(h.telefon) === telefonAnahtari(telefon))) { bildirimGoster("⚠ Bu telefon zaten kayıtlı", "uyari"); return false; }
-    const y = { id: uid(), name: veri.isim, phone: telefon, notes: veri.notlar || "", created_at: bugun() };
+    const y = { id: uid(), name: isim, phone: telefon, notes: metniTemizle(veri.notlar || ""), created_at: bugun() };
     const { error } = await supabase.from(TABLES.patients).insert(y);
     if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
-    setHastalar(prev => [{ id: y.id, isim: veri.isim, telefon, notlar: veri.notlar || "", olusturuldu: bugun() }, ...prev]);
+    setHastalar(prev => [{ id: y.id, isim, telefon, notlar: metniTemizle(veri.notlar || ""), olusturuldu: bugun() }, ...prev]);
     bildirimGoster("Hasta eklendi ✓"); return true;
   };
   const hastaSil = async (id) => {
@@ -323,15 +341,16 @@ export default function App() {
     bildirimGoster("Çöp kutusu boşaltıldı", "uyari");
   };
   const hastaGuncelle = async (id, veri) => {
+    const isim = metniTemizle(veri.isim);
     const telefon = telefonuNormalizeEt(veri.telefon, veri.ulkeKodu || VARSAYILAN_ULKE_KODU);
     if (hastalar.some(h => h.id !== id && telefonAnahtari(h.telefon) === telefonAnahtari(telefon))) {
       bildirimGoster("⚠ Bu telefon zaten kayıtlı", "uyari");
       return false;
     }
-    const payload = { name: veri.isim, phone: telefon, notes: veri.notlar || "" };
+    const payload = { name: isim, phone: telefon, notes: metniTemizle(veri.notlar || "") };
     const { error } = await supabase.from(TABLES.patients).update(payload).eq("id", id);
     if (error) { bildirimGoster("Hata: " + error.message, "hata"); return false; }
-    const guncelHasta = { id, isim: veri.isim, telefon, notlar: veri.notlar || "", olusturuldu: hastalar.find(h => h.id === id)?.olusturuldu || bugun() };
+    const guncelHasta = { id, isim, telefon, notlar: metniTemizle(veri.notlar || ""), olusturuldu: hastalar.find(h => h.id === id)?.olusturuldu || bugun() };
     setHastalar(p => p.map(h => h.id === id ? { ...h, ...guncelHasta } : h));
     setSeciliHasta(prev => prev?.id === id ? { ...prev, ...guncelHasta } : prev);
     bildirimGoster("Hasta bilgileri kaydedildi ✓");
@@ -413,13 +432,13 @@ export default function App() {
     const varOlanTelefonlar = new Set(hastalar.map(h => telefonAnahtari(h.telefon)));
     let ek = 0, at = 0, hata = 0;
     for (const kayit of kayitlar) {
-      const isim = String(kayit.isim || "").trim();
+      const isim = metniTemizle(kayit.isim || "");
       const telefon = telefonuNormalizeEt(kayit.telefon, kayit.ulkeKodu || VARSAYILAN_ULKE_KODU);
       const telefonKey = telefonAnahtari(telefon);
-      const islem = String(kayit.islem || "").trim();
+      const islem = metniTemizle(kayit.islem || "");
       const tarih = excelTarihiniNormalizeEt(kayit.tarih);
       const fiyat = Number(String(kayit.fiyat || "").replace(",", ".")) || 0;
-      const notlar = String(kayit.notlar || "").trim();
+      const notlar = metniTemizle(kayit.notlar || "");
 
       if (!isim || !telefon || !telefonKey || varOlanTelefonlar.has(telefonKey)) { at++; continue; }
 
@@ -1789,12 +1808,12 @@ function IceriAktarModal({ onKapat, onAktar }) {
       const satirlar = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: true });
       const cozulmus = satirlar
         .map(satir => ({
-          isim: String(alanDegeriBul(satir, EXCEL_ALANLARI.isim) || "").trim(),
+          isim: metniTemizle(alanDegeriBul(satir, EXCEL_ALANLARI.isim) || ""),
           telefon: String(alanDegeriBul(satir, EXCEL_ALANLARI.telefon) || "").trim(),
-          islem: String(alanDegeriBul(satir, EXCEL_ALANLARI.islem) || "").trim(),
+          islem: metniTemizle(alanDegeriBul(satir, EXCEL_ALANLARI.islem) || ""),
           tarih: excelTarihiniNormalizeEt(alanDegeriBul(satir, EXCEL_ALANLARI.tarih)),
           fiyat: String(alanDegeriBul(satir, EXCEL_ALANLARI.fiyat) || "").trim(),
-          notlar: String(alanDegeriBul(satir, EXCEL_ALANLARI.notlar) || "").trim(),
+          notlar: metniTemizle(alanDegeriBul(satir, EXCEL_ALANLARI.notlar) || ""),
         }))
         .filter(kayit => Object.values(kayit).some(Boolean));
 
